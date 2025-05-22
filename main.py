@@ -5,6 +5,8 @@ import webbrowser
 from datetime import datetime, timedelta
 import os
 from openai import OpenAI
+import yfinance as yf # Make sure to install yfinance: pip install yfinance
+from unittest.mock import patch, MagicMock
 
 # Point to the local server
 client = OpenAI(base_url="http://localhost:1234/v1", api_key="lm-studio")
@@ -35,6 +37,31 @@ def get_order_status(order_id: str) -> str:
     status = random.choice(statuses)
     print(f"\nget_order_status function returns order status:\n\n{status}", flush=True)
     return {"status": status}
+
+def get_stock_prices(tickers: list[str]) -> dict:
+    """Get the current stock prices for a list of tickers."""
+    stock_prices = {}
+    for ticker_symbol in tickers:
+        try:
+            ticker_data = yf.Ticker(ticker_symbol)
+            # Fetching historical data for the most recent trading day
+            hist = ticker_data.history(period="1d")
+            if not hist.empty and 'Close' in hist:
+                # Using the closing price of the most recent day
+                stock_prices[ticker_symbol] = hist['Close'].iloc[-1]
+            elif 'currentPrice' in ticker_data.info:
+                stock_prices[ticker_symbol] = ticker_data.info['currentPrice']
+            elif 'regularMarketPrice' in ticker_data.info:
+                stock_prices[ticker_symbol] = ticker_data.info['regularMarketPrice']
+            elif 'previousClose' in ticker_data.info: # Fallback to previous close
+                stock_prices[ticker_symbol] = ticker_data.info['previousClose']
+            else:
+                stock_prices[ticker_symbol] = "Price not found"
+        except Exception as e:
+            print(f"Error fetching price for {ticker_symbol}: {e}", flush=True)
+            stock_prices[ticker_symbol] = "Price not found"
+    print(f"\nget_stock_prices function returns:\n\n{stock_prices}", flush=True)
+    return stock_prices
 
 tools = [
     {
@@ -87,7 +114,25 @@ tools = [
                 "required": ["order_id"],
             },
         }
-    } 
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_stock_prices",
+            "description": "Get the current stock price for a list of tickers using Yahoo Finance.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "tickers": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "A list of stock ticker symbols (e.g., ['AAPL', 'MSFT'])."
+                    }
+                },
+                "required": ["tickers"]
+            }
+        }
+    }
 ]
 
 
@@ -127,7 +172,8 @@ def process_tool_calls(response, messages):
     function_mapping = {
         "is_valid_order": lambda args: is_valid_order(args["order_id"]),
         "get_delivery_date": lambda args: get_delivery_date(args["order_id"]),
-        "get_order_status": lambda args: get_order_status(args["order_id"])
+        "get_order_status": lambda args: get_order_status(args["order_id"]),
+        "get_stock_prices": lambda args: get_stock_prices(args["tickers"])
     }
 
     # Determine which function to call based on the tool call name
@@ -162,12 +208,12 @@ def chat():
     messages = [
         {
             "role": "system",
-            "content": "You are a helpful customer support assistant. Use the supplied tools to assist the user and check if they ask about valid order id.",
+            "content": "You are an expert financial consultant with deep knowledge of the stock market. Your goal is to provide insightful advice to users regarding their financial decisions, particularly in relation to stocks. When a user asks for information or advice, you should:\n- Leverage your understanding of market trends, financial metrics, and risk assessment.\n- If you use tools to fetch data (like stock prices), incorporate this data into your analysis.\n- Clearly explain the reasoning behind your advice, including any potential risks or alternative viewpoints.\n- If the user asks about specific orders or non-financial topics, you can politely state that your expertise is in financial consultancy and stock market analysis. Use the available tools to provide financial data when requested."
         }
     ]
 
     print(
-        "Assistant: Hello! I can help you with orders, i can chech order status, delivery time, and delivery status. What would you like me to do?"
+        "Assistant: Hello! I am your expert financial consultant. I can help you with stock market analysis and financial advice. How can I assist you today?"
     )
     print("(Type 'quit' to exit)")
 
