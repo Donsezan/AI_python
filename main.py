@@ -159,43 +159,25 @@ tools = [
 ]
 
 
-def process_tool_calls(response, messages):
-    """Process multiple tool calls and return the final response and updated messages"""
-    # Get all tool calls from the response
-    tool_calls = response.choices[0].message.tool_calls
+def process_tool_calls(response_with_tool_calls, current_call_context_messages):
+    """
+    Processes tool calls requested by the LLM, executes them, and gets a final summary from the LLM.
+    Returns the final summary content and the sequence of messages generated during this process.
+    """
+    tool_calls = response_with_tool_calls.choices[0].message.tool_calls
+    
+    # Make a copy of the context to append new messages related to tool processing
+    messages_for_tool_sequence = list(current_call_context_messages)
 
-    # Create the assistant message with tool calls
-    assistant_tool_call_message = {
-        "role": "assistant",
-        "tool_calls": [
-            {
-                "id": tool_call.id,
-                "type": tool_call.type,
-                "function": tool_call.function,
-            }
-            for tool_call in tool_calls
-        ],
-    }
+    # Append the assistant's message that requested the tool calls
+    # This is crucial for the LLM to understand why it's seeing tool results later
+    assistant_tool_call_request_message = response_with_tool_calls.choices[0].message
+    messages_for_tool_sequence.append(assistant_tool_call_request_message)
 
-    # Add the assistant's tool call message to the history
-    messages.append(assistant_tool_call_message)
-
-    # Process each tool call and collect results
-    tool_results = []
-    for tool_call in tool_calls:
-        # For functions with no arguments, use empty dict
-        arguments = (
-            json.loads(tool_call.function.arguments)
-            if tool_call.function.arguments.strip()
-            else {}
-        )
-
-
-# Define a mapping of function names to their corresponding functions
     function_mapping = {
         "get_stock_prices": lambda args: get_stock_prices(
             args["ticker_symbol"],
-            args.get("period", "1mo"),  # Use .get for optional args with defaults
+            args.get("period", "1mo"),
             args.get("interval", "1d")
         ),
         "calculate_technical_indicator": lambda args: calculate_technical_indicator(
@@ -208,36 +190,53 @@ def process_tool_calls(response, messages):
         )
     }
 
-    # Determine which function to call based on the tool call name
-    if tool_call.function.name in function_mapping:
-        result = function_mapping[tool_call.function.name](arguments)
-    else:
-        # Skip processing this tool call if the function name is not in the mapping
-        print(f"Unknown function name: {tool_call.function.name}", flush=True)
-       
+    for tool_call in tool_calls:
+        arguments = json.loads(tool_call.function.arguments) if tool_call.function.arguments.strip() else {}
+        
+        result_content = ""
+        if tool_call.function.name in function_mapping:
+            try:
+                # For get_stock_prices, the result is a DataFrame. We need to convert it.
+                if tool_call.function.name == "get_stock_prices":
+                    df_result = function_mapping[tool_call.function.name](arguments)
+                    if not df_result.empty:
+                        result_content = df_result.to_json(orient='split', date_format='iso')
+                    else:
+                        result_content = "No data found or error fetching data."
+                else: # For other functions returning dict
+                     result_content_dict = function_mapping[tool_call.function.name](arguments)
+                     result_content = json.dumps(result_content_dict)
 
-        #######
+            except Exception as e:
+                print(f"Error during tool call {tool_call.function.name}: {e}", flush=True)
+                result_content = json.dumps({"error": f"Error executing tool {tool_call.function.name}: {str(e)}"})
+        else:
+            print(f"Unknown function name: {tool_call.function.name}", flush=True)
+            result_content = json.dumps({"error": f"Unknown function {tool_call.function.name}"})
 
-        # Add the result message
         tool_result_message = {
             "role": "tool",
-            "content": json.dumps(result),
+            "content": result_content,
             "tool_call_id": tool_call.id,
         }
-        tool_results.append(tool_result_message)
-        messages.append(tool_result_message)
+        messages_for_tool_sequence.append(tool_result_message)
 
-    # Get the final response
-    final_response = client.chat.completions.create(
+    # Get the final response from the LLM after tools have been called and results appended
+    final_response_after_tools = client.chat.completions.create(
         model=model,
-        messages=messages,
+        messages=messages_for_tool_sequence,
+        # No tools parameter here, as we expect a textual summary now
     )
-
-    return final_response
+    final_content = final_response_after_tools.choices[0].message.content
+    
+    # Append the LLM's summary message to the sequence
+    messages_for_tool_sequence.append({"role": "assistant", "content": final_content})
+    
+    return final_content, messages_for_tool_sequence
 
 
 def chat():
-    messages = [
+    overall_chat_history = [
         {
             "role": "system",
             "content": "You are an expert financial consultant with deep knowledge of the stock market. Your goal is to provide insightful advice to users regarding their financial decisions, particularly in relation to stocks. When a user asks for information or advice, you should:\n- Leverage your understanding of market trends, financial metrics, and risk assessment.\n- If you use tools to fetch data (like stock prices), incorporate this data into your analysis.\n- Clearly explain the reasoning behind your advice, including any potential risks or alternative viewpoints.\n- If the user asks about specific orders or non-financial topics, you can politely state that your expertise is in financial consultancy and stock market analysis. Use the available tools to provide financial data when requested."
@@ -259,44 +258,216 @@ def chat():
             break
 
         # Add user message to conversation
-        messages.append({"role": "user", "content": user_input})
+        overall_chat_history.append({"role": "user", "content": user_input})
 
-        try:
-            # Get initial response
-            response = client.chat.completions.create(
-                model=model,
-                messages=messages,
-                tools=tools,
-            )
+        current_turn_messages = list(overall_chat_history)
+        reasoning_summary_log = []
+        MAX_ITERATIONS = 100 # Max iterations for the reasoning loop for a single user query
+        current_answer = "" # To store the evolving answer from the LLM
 
-            # Check if the response includes tool calls
-            if response.choices[0].message.tool_calls:
-                # Process all tool calls and get final response
-                final_response = process_tool_calls(response, messages)
-                print("\nAssistant:", final_response.choices[0].message.content)
+        for iteration in range(MAX_ITERATIONS):
+            reasoning_summary_log.append(f"Iteration {iteration + 1}")
 
-                # Add assistant's final response to messages
-                messages.append(
-                    {
-                        "role": "assistant",
-                        "content": final_response.choices[0].message.content,
-                    }
+            # TODO: Prepare messages for refinement based on critique (if iteration > 0)
+            # This will involve adding the previous answer and critique to current_turn_messages
+
+            # --- Answer Refinement Mechanism: Prepare messages for LLM ---
+            messages_for_llm_call = []
+            system_message = next((m for m in overall_chat_history if m['role'] == 'system'), None)
+            if system_message:
+                messages_for_llm_call.append(system_message)
+            
+            messages_for_llm_call.append({"role": "user", "content": user_input}) # Original user query
+
+            if iteration > 0:
+                # This is a refinement iteration
+                messages_for_llm_call.append({"role": "assistant", "content": current_answer}) # Previous answer
+                # critique_text is from the critique step of the current iteration, critiquing the 'current_answer' from previous iteration
+                messages_for_llm_call.append({"role": "user", "content": f"I have reviewed my previous answer. Critique: {critique_text}. Please provide a new, refined answer based on this critique to better address the original query: {user_input}"})
+            # For iteration == 0, messages_for_llm_call will just be [system_prompt, user_input]
+            # --- End Answer Refinement Mechanism ---
+
+            try:
+                response = client.chat.completions.create(
+                    model=model,
+                    messages=messages_for_llm_call, 
+                    tools=tools, 
                 )
-            else:
-                # If no tool call, just print the response
-                print("\nAssistant:", response.choices[0].message.content)
+                
+                if response.choices[0].message.tool_calls:
+                    reasoning_summary_log.append("Assistant requests tool call(s).")
+                    # messages_for_llm_call already contains the history that led to this tool call request.
+                    # The 'response' object contains the tool call request itself.
+                    
+                    processed_answer_content, messages_during_tool_processing = process_tool_calls(response, list(messages_for_llm_call))
+                    
+                    current_answer = processed_answer_content
+                    reasoning_summary_log.append(f"Tool(s) used. Answer after tool use: {current_answer}")
+                    
+                    # Update current_turn_messages:
+                    # It should reflect the state *after* the tool calls and the subsequent LLM summary.
+                    # The messages_during_tool_processing already contains:
+                    # 1. Original messages_for_llm_call (that led to tool request)
+                    # 2. The assistant's message requesting the tool call (from 'response')
+                    # 3. Each tool's result message
+                    # 4. The final assistant message summarizing the tool results.
+                    # So, current_turn_messages can be set to this.
+                    current_turn_messages = messages_during_tool_processing
+                    # Note: The last message in messages_during_tool_processing is the assistant's summary,
+                    # which is current_answer. So, we don't need a separate append for current_answer here.
 
-                # Add assistant's response to messages
-                messages.append(
-                    {
-                        "role": "assistant",
-                        "content": response.choices[0].message.content,
-                    }
+                else: # No tool calls
+                    current_answer = response.choices[0].message.content
+                    reasoning_summary_log.append(f"Attempted Answer (no tools): {current_answer}")
+                    # Append the assistant's direct answer to current_turn_messages
+                    # This is done *after* the clarification check below for current_answer
+                    # current_turn_messages.append({"role": "assistant", "content": current_answer}) # Moved below
+
+            except Exception as e:
+                print(f"\nError during LLM call in reasoning loop: {str(e)}")
+                reasoning_summary_log.append(f"Error: {str(e)}")
+                break # Exit reasoning loop on error
+
+            # Critique Step (Placeholder)
+            reasoning_summary_log.append("Critique Step: [Placeholder - critique logic to be implemented]")
+            # TODO: Call LLM for critique. Update current_turn_messages with critique.
+            # Example: current_turn_messages.append({"role": "user", "content": "Critique: The answer is too vague."})
+
+            # Satisfaction Check (Placeholder)
+            reasoning_summary_log.append("Satisfaction Check: [Placeholder - satisfaction logic to be implemented]")
+            # TODO: Call LLM for satisfaction. If satisfied, break.
+            # Example: if is_satisfied(current_answer): break
+
+            # --- Handling questions generated as current_answer ---
+            if current_answer and current_answer.strip().endswith("?"):
+                reasoning_summary_log.append(f"Assistant generated a question for the user: {current_answer}")
+                print(f"\nAssistant (clarification): {current_answer}")
+                
+                user_clarification_input = input("\nYou (clarification): ").strip()
+                overall_chat_history.append({"role": "assistant", "content": current_answer}) # Log assistant's question
+                overall_chat_history.append({"role": "user", "content": user_clarification_input}) # Log user's answer
+                
+                # Update current_turn_messages for the ongoing reasoning process
+                current_turn_messages.append({"role": "assistant", "content": current_answer}) # Assistant's question
+                current_turn_messages.append({"role": "user", "content": user_clarification_input}) # User's answer to clarification
+                
+                reasoning_summary_log.append(f"User provided clarification: {user_clarification_input}")
+                # The loop will proceed to critique. Critique will see the question and user's answer.
+            elif current_answer: # Only append if it's not a question (questions are appended above with user response)
+                # This handles the case where current_answer was from a tool call summary or direct LLM response (not a question)
+                 current_turn_messages.append({"role": "assistant", "content": current_answer})
+
+
+            # --- Internal Critique Mechanism ---
+            critique_prompt_messages = [
+                {"role": "system", "content": "You are an AI assistant evaluating your own previous answer. Be critical and thorough."},
+                {"role": "user", "content": f"The original user query was: {user_input}"},
+                {"role": "assistant", "content": f"The answer I generated is: {current_answer}"},
+                {"role": "user", "content": "Now, critically evaluate this answer based on the following questions: 1. Is the answer correct and relevant to the original query? 2. How confident am I in this answer's accuracy and completeness? 3. What are the potential flaws, biases, or missing information in this answer? 4. How can this answer be improved or made more certain? 5. Does it directly address all parts of the user's query?"}
+            ]
+            try:
+                critique_response = client.chat.completions.create(
+                    model=model,
+                    messages=critique_prompt_messages
                 )
+                critique_text = critique_response.choices[0].message.content
+                reasoning_summary_log.append(f"Critique: {critique_text}")
+            except Exception as e:
+                critique_text = f"Error during critique: {e}"
+                reasoning_summary_log.append(critique_text)
+                # Continue and log error, as per instructions
+            
+            # --- Handling questions generated as critique_text & appending critique to current_turn_messages ---
+            # Store the original critique message for context in refinement
+            internal_critique_message_for_context = {"role": "user", "content": f"Internal Critique of my last answer: {critique_text}"}
+            current_turn_messages.append(internal_critique_message_for_context) # Add the critique itself
 
-        except Exception as e:
-            print(f"\nAn error occurred: {str(e)}")
-            exit(1)
+            if critique_text and critique_text.strip().endswith("?"):
+                reasoning_summary_log.append(f"Critique seems to be a question for the user: {critique_text}")
+                print(f"\nAssistant (clarification from critique): {critique_text}")
+                
+                user_clarification_for_critique = input("\nYou (clarification for critique-question): ").strip()
+                # Log to overall history
+                overall_chat_history.append({"role": "assistant", "content": critique_text}) 
+                overall_chat_history.append({"role": "user", "content": user_clarification_for_critique})
+                
+                # Add user's clarification to current_turn_messages *after* the critique itself
+                current_turn_messages.append({"role": "user", "content": user_clarification_for_critique})
+                reasoning_summary_log.append(f"User provided clarification to critique-question: {user_clarification_for_critique}")
+            # --- End Internal Critique Mechanism & handling critique-questions---
+
+            # --- Loop Termination (Satisfaction Check) ---
+            satisfaction_check_messages = [
+                {"role": "system", "content": "You are an AI assistant evaluating if your last answer is now satisfactory after self-critique, or if further refinement is strictly necessary."},
+                {"role": "user", "content": f"The original user query was: {user_input}"},
+                {"role": "assistant", "content": f"My current answer is: {current_answer}"},
+                {"role": "user", "content": f"My self-critique of this answer was: {critique_text}"}, # critique_text is available from the previous step
+                {"role": "user", "content": "Considering the critique, is the current answer now sufficiently accurate, complete, and directly addresses the user's query? Respond with 'YES' if no further refinement is essential, or 'NO' if significant improvements are still needed. If 'NO', briefly state what key improvement is still required."}
+            ]
+            try:
+                satisfaction_response = client.chat.completions.create(
+                    model=model,
+                    messages=satisfaction_check_messages
+                )
+                satisfaction_decision_text = satisfaction_response.choices[0].message.content.strip().upper()
+                reasoning_summary_log.append(f"Satisfaction Check Response: {satisfaction_decision_text}")
+            except Exception as e:
+                satisfaction_decision_text = f"ERROR DURING SATISFACTION CHECK: {e}"
+                reasoning_summary_log.append(satisfaction_decision_text)
+                satisfaction_decision_text = "NO" # Default to not satisfied on error
+
+            if satisfaction_decision_text.startswith("YES"):
+                reasoning_summary_log.append("Assistant is satisfied with the answer. Terminating loop.")
+                break # Exit the reasoning loop
+            else: # "NO" or other, including error during check
+                reasoning_summary_log.append("Assistant is not satisfied. Continuing refinement if iterations allow.")
+                # Add the satisfaction assessment to current_turn_messages to guide the next refinement
+                current_turn_messages.append({"role": "user", "content": f"Satisfaction Assessment: {satisfaction_decision_text}. Further refinement needed."})
+            # --- End Loop Termination (Satisfaction Check) ---
+        
+        # After Reasoning Loop
+        final_response_content = f"Final Answer:\n{current_answer}\n\nReasoning Summary:\n" + "\n".join(reasoning_summary_log)
+        
+        print(f"\nAssistant: {final_response_content}")
+        overall_chat_history.append({"role": "assistant", "content": final_response_content})
+
+        # Old response logic (commented out or removed)
+        # try:
+        #     # Get initial response
+        #     response = client.chat.completions.create(
+        #         model=model,
+        #         messages=overall_chat_history, # Was 'messages'
+        #         tools=tools,
+        #     )
+
+        #     # Check if the response includes tool calls
+        #     if response.choices[0].message.tool_calls:
+        #         # Process all tool calls and get final response
+        #         final_response = process_tool_calls(response, overall_chat_history) # Was 'messages'
+        #         print("\nAssistant:", final_response.choices[0].message.content)
+
+        #         # Add assistant's final response to messages
+        #         overall_chat_history.append( # Was 'messages'
+        #             {
+        #                 "role": "assistant",
+        #                 "content": final_response.choices[0].message.content,
+        #             }
+        #         )
+        #     else:
+        #         # If no tool call, just print the response
+        #         print("\nAssistant:", response.choices[0].message.content)
+
+        #         # Add assistant's response to messages
+        #         overall_chat_history.append( # Was 'messages'
+        #             {
+        #                 "role": "assistant",
+        #                 "content": response.choices[0].message.content,
+        #             }
+        #         )
+
+        # except Exception as e:
+        #     print(f"\nAn error occurred: {str(e)}")
+        #     # exit(1) # Consider if exiting is the best approach or just logging and continuing
 
 
 if __name__ == "__main__":
