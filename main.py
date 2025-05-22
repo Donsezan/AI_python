@@ -6,130 +6,153 @@ from datetime import datetime, timedelta
 import os
 from openai import OpenAI
 import yfinance as yf # Make sure to install yfinance: pip install yfinance
+import pandas as pd
+import ta # Make sure to install pandas and ta: pip install pandas ta
 from unittest.mock import patch, MagicMock
+
+# Indicator Constants
+INDICATOR_RSI = "RSI"
+INDICATOR_STOCHASTIC_OSCILLATOR = "StochasticOscillator"
+INDICATOR_ROC = "ROC"
+INDICATOR_MFI = "MFI"
+SUPPORTED_INDICATORS = [INDICATOR_RSI, INDICATOR_STOCHASTIC_OSCILLATOR, INDICATOR_ROC, INDICATOR_MFI]
 
 # Point to the local server
 client = OpenAI(base_url="http://localhost:1234/v1", api_key="lm-studio")
 model = "qwen3-4b"
 
-orders = ["1045", "1046", "1047", "1048", "1049", "1050", "1051", "1052", "1053", "1054", "1055"]
+def get_stock_prices(ticker_symbol: str, period: str = "1mo", interval: str = "1d") -> pd.DataFrame:
+    """Get historical stock data for a single ticker symbol."""
+    try:
+        ticker_data = yf.Ticker(ticker_symbol)
+        hist = ticker_data.history(period=period, interval=interval)
+        if not hist.empty:
+            print(f"Successfully fetched historical data for {ticker_symbol}. Shape: {hist.shape}", flush=True)
+            return hist
+        else:
+            print(f"No historical data found for {ticker_symbol} for the period {period} and interval {interval}.", flush=True)
+            return pd.DataFrame()
+    except Exception as e:
+        print(f"Could not retrieve historical data for {ticker_symbol}: {e}", flush=True)
+        return pd.DataFrame()
 
-def is_valid_order(order_id: int) -> bool:
-    """Check if the order is valid"""
-    return {"is_valid": order_id in orders}
+def calculate_technical_indicator(ticker_symbol: str, indicator_type: str, data_period: str = "6mo", data_interval: str = "1d", window: int = 14, smooth_window: int = 3) -> dict:
+    """Calculates a specified technical indicator for a given stock ticker."""
+    if indicator_type not in SUPPORTED_INDICATORS:
+        return {"error": "Unsupported indicator type"}
 
-def get_delivery_date(order_id: str) -> datetime:
-    # Generate a random delivery date between today and 14 days from now
-    # in a real-world scenario, this function would query a database or API
-    today = datetime.now()
-    random_days = random.randint(1, 14)
-    delivery_date = today + timedelta(days=random_days)
-    print(
-        f"\nget_delivery_date function returns delivery date:\n\n{delivery_date}",
-        flush=True,
-    )
-    return {"delivery_date": delivery_date.isoformat()}
+    df = get_stock_prices(ticker_symbol, period=data_period, interval=data_interval)
 
-def get_order_status(order_id: str) -> str:
-    # Simulate getting order status from a database or API
-    # In a real-world scenario, this function would query a database or API
-    statuses = ["Processing", "Shipped", "Delivered", "Cancelled"]
-    status = random.choice(statuses)
-    print(f"\nget_order_status function returns order status:\n\n{status}", flush=True)
-    return {"status": status}
+    if df.empty:
+        return {"error": "Could not retrieve historical data"}
 
-def get_stock_prices(tickers: list[str]) -> dict:
-    """Get the current stock prices for a list of tickers."""
-    stock_prices = {}
-    for ticker_symbol in tickers:
-        try:
-            ticker_data = yf.Ticker(ticker_symbol)
-            # Fetching historical data for the most recent trading day
-            hist = ticker_data.history(period="1d")
-            if not hist.empty and 'Close' in hist:
-                # Using the closing price of the most recent day
-                stock_prices[ticker_symbol] = hist['Close'].iloc[-1]
-            elif 'currentPrice' in ticker_data.info:
-                stock_prices[ticker_symbol] = ticker_data.info['currentPrice']
-            elif 'regularMarketPrice' in ticker_data.info:
-                stock_prices[ticker_symbol] = ticker_data.info['regularMarketPrice']
-            elif 'previousClose' in ticker_data.info: # Fallback to previous close
-                stock_prices[ticker_symbol] = ticker_data.info['previousClose']
-            else:
-                stock_prices[ticker_symbol] = "Price not found"
-        except Exception as e:
-            print(f"Error fetching price for {ticker_symbol}: {e}", flush=True)
-            stock_prices[ticker_symbol] = "Price not found"
-    print(f"\nget_stock_prices function returns:\n\n{stock_prices}", flush=True)
-    return stock_prices
+    # Basic data cleaning
+    required_columns_for_mfi = ['High', 'Low', 'Close', 'Volume']
+    if indicator_type == INDICATOR_MFI and not all(col in df.columns for col in required_columns_for_mfi):
+        return {"error": "Dataframe missing required HLCV columns for MFI"}
+    
+    required_columns_for_stoch = ['High', 'Low', 'Close']
+    if indicator_type == INDICATOR_STOCHASTIC_OSCILLATOR and not all(col in df.columns for col in required_columns_for_stoch):
+        return {"error": "Dataframe missing required HLC columns for Stochastic Oscillator"}
+
+    # Ensure 'Close' column exists for RSI and ROC
+    if indicator_type in [INDICATOR_RSI, INDICATOR_ROC] and 'Close' not in df.columns:
+        return {"error": "Dataframe missing required Close column"}
+        
+    df.dropna(inplace=True) # Drop rows with NaN values that can affect calculations
+
+    result = {}
+    try:
+        if indicator_type == INDICATOR_RSI:
+            indicator = ta.momentum.RSIIndicator(close=df['Close'], window=window)
+            rsi_series = indicator.rsi()
+            result = {"rsi": rsi_series.iloc[-1] if rsi_series is not None and not rsi_series.empty and len(rsi_series) > 0 else "Not enough data"}
+        elif indicator_type == INDICATOR_STOCHASTIC_OSCILLATOR:
+            indicator = ta.momentum.StochasticOscillator(high=df['High'], low=df['Low'], close=df['Close'], window=window, smooth_window=smooth_window)
+            stoch_k_series = indicator.stoch()
+            stoch_d_series = indicator.stoch_signal()
+            result = {
+                "stoch_k": stoch_k_series.iloc[-1] if stoch_k_series is not None and not stoch_k_series.empty and len(stoch_k_series) > 0 else "Not enough data",
+                "stoch_d": stoch_d_series.iloc[-1] if stoch_d_series is not None and not stoch_d_series.empty and len(stoch_d_series) > 0 else "Not enough data"
+            }
+        elif indicator_type == INDICATOR_ROC:
+            indicator = ta.momentum.ROCIndicator(close=df['Close'], window=window)
+            roc_series = indicator.roc()
+            result = {"roc": roc_series.iloc[-1] if roc_series is not None and not roc_series.empty and len(roc_series) > 0 else "Not enough data"}
+        elif indicator_type == INDICATOR_MFI:
+            indicator = ta.volume.MFIIndicator(high=df['High'], low=df['Low'], close=df['Close'], volume=df['Volume'], window=window)
+            mfi_series = indicator.money_flow_index()
+            result = {"mfi": mfi_series.iloc[-1] if mfi_series is not None and not mfi_series.empty and len(mfi_series) > 0 else "Not enough data"}
+        else:
+            return {"error": "Unknown indicator calculation error"} # Should be caught by initial validation
+    except IndexError: # Handles cases where iloc[-1] fails due to insufficient data for window
+        return {"error": f"Not enough data to calculate {indicator_type} for the given window {window}"}
+    except Exception as e:
+        print(f"Error calculating {indicator_type} for {ticker_symbol}: {e}", flush=True)
+        return {"error": f"An error occurred during {indicator_type} calculation: {str(e)}"}
+        
+    return result
 
 tools = [
     {
         "type": "function",
         "function": {
-            "name": "is_valid_order",
-            "description": "Check if the order ID is valid",
+            "name": "get_stock_prices",
+            "description": "Get historical stock data for a given ticker symbol, period, and interval.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "order_id": {
+                    "ticker_symbol": {
                         "type": "string",
-                        "description": "Order ID to check",
+                        "description": "The stock ticker symbol (e.g., 'AAPL')."
                     },
-                },
-                "required": ["order_id"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "get_delivery_date",
-            "description": "Get the estimated delivery date for an order",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "order_id": {
+                    "period": {
                         "type": "string",
-                        "description": "Order ID to check",
+                        "description": "The period for which to fetch data (e.g., '1mo', '3mo', '1y'). Default is '1mo'."
                     },
-                },
-                "required": ["order_id"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "get_order_status",
-            "description": "Get the current status of an order",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "order_id": {
+                    "interval": {
                         "type": "string",
-                        "description": "Order ID to check",
-                    },
+                        "description": "The interval of data points (e.g., '1d', '1wk', '1mo'). Default is '1d'."
+                    }
                 },
-                "required": ["order_id"],
-            },
+                "required": ["ticker_symbol"]
+            }
         }
     },
     {
         "type": "function",
         "function": {
-            "name": "get_stock_prices",
-            "description": "Get the current stock price for a list of tickers using Yahoo Finance.",
+            "name": "calculate_technical_indicator",
+            "description": "Calculates a specified technical indicator (RSI, StochasticOscillator, ROC, MFI) for a stock ticker using historical data.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "tickers": {
-                        "type": "array",
-                        "items": {"type": "string"},
-                        "description": "A list of stock ticker symbols (e.g., ['AAPL', 'MSFT'])."
+                    "ticker_symbol": {
+                        "type": "string",
+                        "description": "The stock ticker symbol (e.g., 'AAPL')."
+                    },
+                    "indicator_type": {
+                        "type": "string",
+                        "description": "The type of technical indicator to calculate. Supported values: 'RSI', 'StochasticOscillator', 'ROC', 'MFI'."
+                    },
+                    "data_period": {
+                        "type": "string",
+                        "description": "The period for fetching historical data (e.g., '6mo', '1y'). Default: '6mo'."
+                    },
+                    "data_interval": {
+                        "type": "string",
+                        "description": "The interval for historical data points (e.g., '1d', '1wk'). Default: '1d'."
+                    },
+                    "window": {
+                        "type": "integer",
+                        "description": "The calculation window for the indicator (e.g., 14 for RSI). Default: 14."
+                    },
+                    "smooth_window": {
+                        "type": "integer",
+                        "description": "The smoothing window, primarily for Stochastic Oscillator's %D line. Default: 3."
                     }
                 },
-                "required": ["tickers"]
+                "required": ["ticker_symbol", "indicator_type"]
             }
         }
     }
@@ -170,10 +193,19 @@ def process_tool_calls(response, messages):
 
 # Define a mapping of function names to their corresponding functions
     function_mapping = {
-        "is_valid_order": lambda args: is_valid_order(args["order_id"]),
-        "get_delivery_date": lambda args: get_delivery_date(args["order_id"]),
-        "get_order_status": lambda args: get_order_status(args["order_id"]),
-        "get_stock_prices": lambda args: get_stock_prices(args["tickers"])
+        "get_stock_prices": lambda args: get_stock_prices(
+            args["ticker_symbol"],
+            args.get("period", "1mo"),  # Use .get for optional args with defaults
+            args.get("interval", "1d")
+        ),
+        "calculate_technical_indicator": lambda args: calculate_technical_indicator(
+            args["ticker_symbol"],
+            args["indicator_type"],
+            args.get("data_period", "6mo"),
+            args.get("data_interval", "1d"),
+            args.get("window", 14),
+            args.get("smooth_window", 3)
+        )
     }
 
     # Determine which function to call based on the tool call name
@@ -268,5 +300,15 @@ def chat():
 
 
 if __name__ == "__main__":
+    # Simple test for the modified get_stock_prices
+    # test_df_aapl = get_stock_prices("AAPL", period="1wk")
+    # print("\nTest - AAPL weekly data for 1 week:")
+    # print(test_df_aapl)
+
+    # test_df_invalid = get_stock_prices("INVALIDTICKER")
+    # print("\nTest - Invalid ticker data:")
+    # print(test_df_invalid)
+    # test_get_stock_prices() # Commented out previous test for get_stock_prices
+    test_calculate_technical_indicators() # New test call
     chat()
 
