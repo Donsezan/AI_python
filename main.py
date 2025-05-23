@@ -426,6 +426,10 @@ def chat():
             # --- End Loop Termination (Satisfaction Check) ---
         
         # After Reasoning Loop
+        # Check if the loop completed all its iterations
+        if iteration == MAX_ITERATIONS - 1:
+            reasoning_summary_log.append(f"NOTE: Reasoning process completed all {MAX_ITERATIONS} iterations.")
+            
         final_response_content = f"Final Answer:\n{current_answer}\n\nReasoning Summary:\n" + "\n".join(reasoning_summary_log)
         
         print(f"\nAssistant: {final_response_content}")
