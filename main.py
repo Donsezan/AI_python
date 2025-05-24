@@ -19,7 +19,7 @@ SUPPORTED_INDICATORS = [INDICATOR_RSI, INDICATOR_STOCHASTIC_OSCILLATOR, INDICATO
 
 # Point to the local server
 client = OpenAI(base_url="http://localhost:1234/v1", api_key="lm-studio")
-model = "qwen3-4b"
+model = "gemma-3-12b-it-qat"
 
 def get_stock_prices(ticker_symbol: str, period: str = "1mo", interval: str = "1d") -> pd.DataFrame:
     """Get historical stock data for a single ticker symbol."""
@@ -268,9 +268,6 @@ def chat():
         for iteration in range(MAX_ITERATIONS):
             reasoning_summary_log.append(f"Iteration {iteration + 1}")
 
-            # TODO: Prepare messages for refinement based on critique (if iteration > 0)
-            # This will involve adding the previous answer and critique to current_turn_messages
-
             # --- Answer Refinement Mechanism: Prepare messages for LLM ---
             messages_for_llm_call = []
             system_message = next((m for m in overall_chat_history if m['role'] == 'system'), None)
@@ -304,18 +301,8 @@ def chat():
                     current_answer = processed_answer_content
                     reasoning_summary_log.append(f"Tool(s) used. Answer after tool use: {current_answer}")
                     
-                    # Update current_turn_messages:
-                    # It should reflect the state *after* the tool calls and the subsequent LLM summary.
-                    # The messages_during_tool_processing already contains:
-                    # 1. Original messages_for_llm_call (that led to tool request)
-                    # 2. The assistant's message requesting the tool call (from 'response')
-                    # 3. Each tool's result message
-                    # 4. The final assistant message summarizing the tool results.
-                    # So, current_turn_messages can be set to this.
                     current_turn_messages = messages_during_tool_processing
-                    # Note: The last message in messages_during_tool_processing is the assistant's summary,
-                    # which is current_answer. So, we don't need a separate append for current_answer here.
-
+                    
                 else: # No tool calls
                     current_answer = response.choices[0].message.content
                     reasoning_summary_log.append(f"Attempted Answer (no tools): {current_answer}")
@@ -398,11 +385,11 @@ def chat():
 
             # --- Loop Termination (Satisfaction Check) ---
             satisfaction_check_messages = [
-                {"role": "system", "content": "You are an AI assistant evaluating if your last answer is now satisfactory after self-critique, or if further refinement is strictly necessary."},
-                {"role": "user", "content": f"The original user query was: {user_input}"},
-                {"role": "assistant", "content": f"My current answer is: {current_answer}"},
+                #{"role": "system", "content": "You are an AI assistant evaluating if your last answer is now satisfactory after self-critique, or if further refinement is strictly necessary."},
+                #{"role": "user", "content": f"The original user query was: {user_input}"},
+                #{"role": "assistant", "content": f"My current answer is: {current_answer}"},
                 {"role": "user", "content": f"My self-critique of this answer was: {critique_text}"}, # critique_text is available from the previous step
-                {"role": "user", "content": "Considering the critique, is the current answer now sufficiently accurate, complete, and directly addresses the user's query? Respond with 'YES' if no further refinement is essential, or 'NO' if significant improvements are still needed. If 'NO', briefly state what key improvement is still required."}
+                {"role": "user", "content": "Considering the critique, is the current answer now sufficiently accurate, complete, and directly addresses the user's query? Respond with first 'YES' if no further refinement is essential, or 'NO' if significant improvements are still needed. If 'NO', briefly state what key improvement is still required."}
             ]
             try:
                 satisfaction_response = client.chat.completions.create(
@@ -435,44 +422,6 @@ def chat():
         print(f"\nAssistant: {final_response_content}")
         overall_chat_history.append({"role": "assistant", "content": final_response_content})
 
-        # Old response logic (commented out or removed)
-        # try:
-        #     # Get initial response
-        #     response = client.chat.completions.create(
-        #         model=model,
-        #         messages=overall_chat_history, # Was 'messages'
-        #         tools=tools,
-        #     )
-
-        #     # Check if the response includes tool calls
-        #     if response.choices[0].message.tool_calls:
-        #         # Process all tool calls and get final response
-        #         final_response = process_tool_calls(response, overall_chat_history) # Was 'messages'
-        #         print("\nAssistant:", final_response.choices[0].message.content)
-
-        #         # Add assistant's final response to messages
-        #         overall_chat_history.append( # Was 'messages'
-        #             {
-        #                 "role": "assistant",
-        #                 "content": final_response.choices[0].message.content,
-        #             }
-        #         )
-        #     else:
-        #         # If no tool call, just print the response
-        #         print("\nAssistant:", response.choices[0].message.content)
-
-        #         # Add assistant's response to messages
-        #         overall_chat_history.append( # Was 'messages'
-        #             {
-        #                 "role": "assistant",
-        #                 "content": response.choices[0].message.content,
-        #             }
-        #         )
-
-        # except Exception as e:
-        #     print(f"\nAn error occurred: {str(e)}")
-        #     # exit(1) # Consider if exiting is the best approach or just logging and continuing
-
 
 if __name__ == "__main__":
     # Simple test for the modified get_stock_prices
@@ -484,6 +433,6 @@ if __name__ == "__main__":
     # print("\nTest - Invalid ticker data:")
     # print(test_df_invalid)
     # test_get_stock_prices() # Commented out previous test for get_stock_prices
-    test_calculate_technical_indicators() # New test call
+    #test_calculate_technical_indicators() # New test call
     chat()
 
