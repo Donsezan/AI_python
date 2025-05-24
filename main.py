@@ -200,7 +200,7 @@ def process_tool_calls(response_with_tool_calls, current_call_context_messages):
                 if tool_call.function.name == "get_stock_prices":
                     df_result = function_mapping[tool_call.function.name](arguments)
                     if not df_result.empty:
-                        result_content = df_result.to_json(orient='split', date_format='iso')
+                        result_content = df_result.reset_index().to_json(orient='records', date_format='iso')
                     else:
                         result_content = "No data found or error fetching data."
                 else: # For other functions returning dict
@@ -233,6 +233,82 @@ def process_tool_calls(response_with_tool_calls, current_call_context_messages):
     messages_for_tool_sequence.append({"role": "assistant", "content": final_content})
     
     return final_content, messages_for_tool_sequence
+
+def test_get_stock_prices_json_format():
+    """Tests the JSON output format of get_stock_prices, simulating process_tool_calls."""
+    print("Running test_get_stock_prices_json_format...", flush=True)
+
+    # Test case 1: Successful data fetch and JSON conversion
+    @patch('main.yf.Ticker') # Patching yf.Ticker within the main module
+    def test_successful_fetch(mock_yf_ticker):
+        print("  Running test_successful_fetch...", flush=True)
+        # Prepare mock DataFrame
+        data = {'Open': [150.0, 151.0], 'High': [152.0, 151.5], 'Low': [149.0, 150.0], 'Close': [151.5, 150.5], 'Volume': [100000, 120000]}
+        # Ensure UTC timezone for direct ISO conversion with timezone offset
+        index = pd.to_datetime(['2023-01-01T00:00:00', '2023-01-02T00:00:00'], utc=True)
+        mock_df = pd.DataFrame(data, index=index)
+        mock_df.index.name = 'Date' # Naming the index is important for it to be included in 'records' orientation
+
+        # Configure the mock
+        mock_ticker_instance = MagicMock()
+        mock_ticker_instance.history.return_value = mock_df
+        mock_yf_ticker.return_value = mock_ticker_instance
+
+        # Call the function being tested
+        df_result = get_stock_prices("TEST_SUCCESS_TICKER", period="2d", interval="1d")
+
+        assert not df_result.empty, "DataFrame result should not be empty for successful fetch"
+
+        # Simulate the JSON conversion, ensuring index is included as per test spec
+        json_output_string = df_result.reset_index().to_json(orient='records', date_format='iso')
+        
+        # Parse and assert
+        parsed_json_list = json.loads(json_output_string)
+        
+        assert isinstance(parsed_json_list, list), "Parsed JSON should be a list"
+        assert len(parsed_json_list) == 2, "Parsed JSON list should have 2 records"
+        
+        first_record_dict = parsed_json_list[0]
+        assert isinstance(first_record_dict, dict), "Each item in parsed JSON list should be a dict"
+        
+        # Expected keys: DataFrame columns + named index
+        expected_keys = ['Date', 'Open', 'High', 'Low', 'Close', 'Volume'] 
+        assert all(key in first_record_dict for key in expected_keys), f"Record keys do not match. Expected: {expected_keys}, Got: {list(first_record_dict.keys())}"
+        assert len(first_record_dict.keys()) == len(expected_keys), "Number of keys in record is incorrect."
+
+        # Check date format (ISO 8601)
+        # pd.to_datetime with utc=True creates timezone-aware datetimes.
+        # to_json with date_format='iso' and UTC index produces 'Z' for Zulu time.
+        assert first_record_dict['Date'] == '2023-01-01T00:00:00.000Z', f"Date format incorrect. Expected ISO format with Z (UTC). Got: {first_record_dict['Date']}"
+        assert first_record_dict['Open'] == 150.0
+
+        print("  Test case 1 (successful fetch) PASSED", flush=True)
+
+    test_successful_fetch()
+
+    # Test case 2: Empty DataFrame response
+    @patch('main.yf.Ticker') # Patching yf.Ticker within the main module
+    def test_empty_fetch(mock_yf_ticker):
+        print("  Running test_empty_fetch...", flush=True)
+        # Configure the mock to return an empty DataFrame
+        mock_ticker_instance = MagicMock()
+        mock_ticker_instance.history.return_value = pd.DataFrame() # Empty DataFrame
+        mock_yf_ticker.return_value = mock_ticker_instance
+
+        # Call the function
+        df_result = get_stock_prices("TEST_EMPTY_TICKER", period="1d", interval="1d")
+
+        assert df_result.empty, "DataFrame result should be empty for this test case"
+
+        # Simulate JSON conversion for an empty DataFrame
+        json_output_string = df_result.to_json(orient='records', date_format='iso')
+
+        # Assert
+        assert json_output_string == '[]', f"Expected '[]' for empty DataFrame, got {json_output_string}"
+        print("  Test case 2 (empty fetch) PASSED", flush=True)
+
+    test_empty_fetch()
+    print("test_get_stock_prices_json_format completed successfully.", flush=True)
 
 
 def chat():
@@ -434,5 +510,6 @@ if __name__ == "__main__":
     # print(test_df_invalid)
     # test_get_stock_prices() # Commented out previous test for get_stock_prices
     #test_calculate_technical_indicators() # New test call
+    test_get_stock_prices_json_format()
     chat()
 
