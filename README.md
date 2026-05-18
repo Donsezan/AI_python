@@ -5,8 +5,8 @@ A news aggregation bot that scrapes local Málaga news, evaluates article releva
 ## How It Works
 
 1. **Fetch** — Scrapes article links and content from the configured news source
-2. **Deduplicate** — Embeds each title with Cohere and compares cosine similarity against Supabase-stored embeddings; falls back to Jaccard on legacy rows
-3. **Evaluate** — Gemini scores each article's relevance (0–10); articles below 6 are skipped
+2. **Deduplicate** — Checks the article URL against Supabase first (free, in-memory); then embeds the title with Cohere and compares cosine similarity against stored embeddings; falls back to Jaccard on legacy rows
+3. **Evaluate** — Gemini scores each article's relevance (0–10); articles below 6 are saved to Supabase (so they are not re-evaluated next cycle) and then skipped
 4. **Summarize** — Gemini generates an emoji-rich, Telegram-ready summary
 5. **Post** — Sends media groups (up to 9 images) or plain text to the Telegram channel
 6. **Cleanup** — Daily job removes articles older than 10 days
@@ -25,8 +25,10 @@ A news aggregation bot that scrapes local Málaga news, evaluates article releva
     id uuid primary key,
     title text,
     date text,
-    embedding jsonb
+    embedding jsonb,
+    url text
   );
+  create unique index articles_url_idx on articles (url) where url is not null;
   ```
 
 ### Install

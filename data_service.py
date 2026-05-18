@@ -54,12 +54,15 @@ class DataService:
 
     def fetch_recent_articles(self):
         try:
-            resp = requests.get(self.url, headers=self.headers, params={"select": "title,embedding"}, timeout=15)
+            resp = requests.get(self.url, headers=self.headers, params={"select": "title,embedding,url"}, timeout=15)
             resp.raise_for_status()
             return resp.json()
         except Exception as e:
             logger.error(f"Error fetching recent articles: {e}")
             return []
+
+    def is_url_seen(self, href, rows):
+        return any(row.get("url") == href for row in rows)
 
     def is_new_article_cached(self, title, rows):
         try:
@@ -82,7 +85,7 @@ class DataService:
         rows = self.fetch_recent_articles()
         return self.is_new_article_cached(title, rows)
 
-    def save_article(self, title, date_time):
+    def save_article(self, title, date_time, url=None):
         try:
             embedding = self._embed(title)
         except Exception as e:
@@ -90,15 +93,18 @@ class DataService:
             embedding = None
 
         try:
+            payload = {
+                "id": str(uuid.uuid4()),
+                "title": title,
+                "date": date_time.isoformat(),
+                "embedding": embedding,
+            }
+            if url:
+                payload["url"] = url
             resp = requests.post(
                 self.url,
                 headers=self.headers,
-                json={
-                    "id": str(uuid.uuid4()),
-                    "title": title,
-                    "date": date_time.isoformat(),
-                    "embedding": embedding,
-                },
+                json=payload,
                 timeout=15,
             )
             resp.raise_for_status()

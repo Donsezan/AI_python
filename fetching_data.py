@@ -38,7 +38,12 @@ class FetchingData:
             'septiembre': '09', 'octubre': '10', 'noviembre': '11', 'diciembre': '12',
         }
         parts = date_text.strip().split('\n')
-        date_string = parts[1] if len(parts) > 1 else parts[0]
+        date_string = next(
+            (p for p in parts if any(m in p.lower() for m in month_mapping)),
+            None,
+        )
+        if date_string is None:
+            raise ValueError(f"No date found in: {date_text!r}")
         for month_name, month_number in month_mapping.items():
             if month_name in date_string:
                 date_string = date_string.replace(month_name, month_number)

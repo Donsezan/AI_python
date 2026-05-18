@@ -70,6 +70,9 @@ def job(dry_run=False):
     for title, href in new_articles:
         if _shutdown.is_set():
             break
+        if data_service.is_url_seen(href, known_articles):
+            logger.info(f"Skipping already-seen URL: {href}")
+            continue
         try:
             _process_article(title, href, known_articles, dry_run=dry_run)
         except Exception as e:
@@ -103,6 +106,8 @@ def _process_article(title, href, known_articles, dry_run=False):
     logger.info(f"Article score: {article_score}")
     if article_score < 6:
         logger.info(f"Article '{title}' scored {article_score:.1f}, below threshold. Skipping.")
+        if not dry_run:
+            data_service.save_article(title, date_time, url=href)
         return
 
     logger.info("Summarizing with emojis...")
@@ -122,7 +127,7 @@ def _process_article(title, href, known_articles, dry_run=False):
         return
 
     logger.info("Saving article...")
-    if not data_service.save_article(title, date_time):
+    if not data_service.save_article(title, date_time, url=href):
         logger.warning(f"Posted '{title}' but failed to save — may duplicate next run.")
 
     if _shutdown.wait(timeout=10):
