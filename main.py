@@ -2,7 +2,6 @@ import os
 import sys
 import signal
 import threading
-import time
 import random
 import logging
 from datetime import datetime, timedelta, date
@@ -46,13 +45,17 @@ telegram_service = TelegramService(BOT_TOKEN, CHAT_ID)
 ai_service = AIService.get_service(provider=current_ai_provider, gemini_api_key=GEMINI_API_KEY)
 
 _shutdown = threading.Event()
+_rate_limited = False  # circuit breaker: True when Gemini returns 429
 
 
-def _with_retry(fn, retries=3, base_delay=10):
+def _with_retry(fn, retries=5, base_delay=20):
+    global _rate_limited
     for attempt in range(1, retries + 1):
         try:
             return fn()
         except Exception as e:
+            if '429' in str(e):
+                _rate_limited = True
             logger.warning(f"LLM error (attempt {attempt}/{retries}): {e!r}")
             if attempt < retries:
                 sleep = base_delay * (2 ** (attempt - 1)) + random.uniform(0, 1)
@@ -63,6 +66,8 @@ def _with_retry(fn, retries=3, base_delay=10):
 
 
 def job(dry_run=False):
+    global _rate_limited
+    _rate_limited = False
     logger.info("Fetching latest articles...")
     new_articles = fetch_service.fetch_latest_articles()
     logger.info(f"Found {len(new_articles)} new articles.")
@@ -70,6 +75,12 @@ def job(dry_run=False):
     for title, href in new_articles:
         if _shutdown.is_set():
             break
+        if _rate_limited:
+            logger.warning("Gemini rate-limited — aborting job cycle early, will retry next run.")
+            break
+        if not href or len(title.strip()) < 20:
+            logger.debug(f"Skipping invalid article entry: '{title}'")
+            continue
         if data_service.is_url_seen(href, known_articles):
             logger.info(f"Skipping already-seen URL: {href}")
             continue
@@ -77,6 +88,8 @@ def job(dry_run=False):
             _process_article(title, href, known_articles, dry_run=dry_run)
         except Exception as e:
             logger.error(f"[job] Article '{title}' failed: {e!r}")
+        if _shutdown.wait(timeout=5):
+            break
     logger.info("Job finished.")
 
 
@@ -86,19 +99,15 @@ def _process_article(title, href, known_articles, dry_run=False):
         logger.info(f"Article '{title}' already processed, skipping.")
         return
 
-    logger.info("Fetching and summarizing article...")
-    result = fetch_service.fetch_and_summarize(title, href)
-    if not result:
-        logger.warning("Failed to fetch and summarize article.")
+    logger.info("Fetching article metadata...")
+    meta = fetch_service.fetch_article(title, href)
+    if not meta:
+        logger.warning("Failed to fetch article or article is too old.")
         return
-
-    main_content, images, date_time = result
-    if not main_content or not date_time:
-        logger.warning("Article content or date/time is missing.")
-        return
-
-    logger.info("Evaluating article...")
-    article_score = _with_retry(lambda: ai_service.evaluate_article(title))
+    soup, date_time = meta
+    main_content, images = fetch_service.parse_content(soup)
+    logger.info("Evaluating main content...")
+    article_score = _with_retry(lambda: ai_service.evaluate_article(main_content))
     if not article_score:
         logger.warning(f"Failed to evaluate article '{title}'. Skipping.")
         return
@@ -108,6 +117,11 @@ def _process_article(title, href, known_articles, dry_run=False):
         logger.info(f"Article '{title}' scored {article_score:.1f}, below threshold. Skipping.")
         if not dry_run:
             data_service.save_article(title, date_time, url=href)
+        return
+
+  
+    if not main_content:
+        logger.warning("Article content is missing.")
         return
 
     logger.info("Summarizing with emojis...")

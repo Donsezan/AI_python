@@ -75,10 +75,9 @@ class FetchingData:
         unique_urls = set(all_images)
         return [url for url in unique_urls if url.endswith('.jpg') and f'_{max_resolution}w_' in url]
 
-    def fetch_and_summarize(self, title, href):
-        logger.info(f"Fetching and summarizing article: {title}")
-        if title == "Málaga":
-            return None
+    def fetch_article(self, title, href):
+        """Fetch article page and validate date. Returns (soup, date_time) or None."""
+        logger.info(f"Fetching article: {title}")
         try:
             resp = requests.get(href, headers=self.headers, timeout=15)
             resp.raise_for_status()
@@ -88,8 +87,7 @@ class FetchingData:
             if not h1:
                 logger.warning(f"[fetch] No <h1> on {href}")
                 return None
-            title = h1.get_text(strip=True)
-            logger.info(f"Article title: {title}")
+            logger.info(f"Article title: {h1.get_text(strip=True)}")
 
             date_node = soup.find('p', class_='timestamp-atom')
             if not date_node:
@@ -107,14 +105,7 @@ class FetchingData:
                 logger.info("Article is older than 7 days, skipping.")
                 return None
 
-            content = '\n'.join(p.get_text(strip=True) for p in soup.find_all('p'))
-            if not content.strip():
-                logger.warning(f"[fetch] No content extracted from {href}")
-                return None
-
-            images = self._extract_images(soup)
-            logger.info(f"Found {len(images)} images.")
-            return content, images, date_time
+            return soup, date_time
 
         except requests.RequestException as e:
             logger.error(f"[fetch] HTTP error for {href}: {e}")
@@ -122,3 +113,10 @@ class FetchingData:
         except Exception as e:
             logger.error(f"[fetch] Unexpected error for {href}: {e!r}")
             return None
+
+    def parse_content(self, soup):
+        """Extract text content and images from an already-fetched soup object."""
+        content = '\n'.join(p.get_text(strip=True) for p in soup.find_all('p'))
+        images = self._extract_images(soup)
+        logger.info(f"Found {len(images)} images.")
+        return content, images
