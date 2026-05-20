@@ -106,6 +106,11 @@ def _process_article(title, href, known_articles, dry_run=False):
         return
     soup, date_time = meta
     main_content, images = fetch_service.parse_content(soup)
+
+    if not main_content:
+        logger.warning("Article content is missing.")
+        return
+
     logger.info("Evaluating main content...")
     article_score = _with_retry(lambda: ai_service.evaluate_article(main_content))
     if not article_score:
@@ -117,11 +122,6 @@ def _process_article(title, href, known_articles, dry_run=False):
         logger.info(f"Article '{title}' scored {article_score:.1f}, below threshold. Skipping.")
         if not dry_run:
             data_service.save_article(title, date_time, url=href)
-        return
-
-  
-    if not main_content:
-        logger.warning("Article content is missing.")
         return
 
     logger.info("Summarizing with emojis...")
