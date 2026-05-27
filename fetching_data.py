@@ -8,9 +8,10 @@ logger = logging.getLogger(__name__)
 
 
 class FetchingData:
-    def __init__(self, news_url, headers):
+    def __init__(self, news_url, headers, language='es'):
         self.news_url = news_url
         self.headers = headers
+        self.language = language
 
     def fetch_latest_articles(self):
         logger.info(f"Fetching latest articles from: {self.news_url}")

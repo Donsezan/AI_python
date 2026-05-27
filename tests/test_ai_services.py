@@ -15,72 +15,75 @@ class TestOpenAIService(unittest.TestCase):
     def setUp(self):
         self.service = OpenAIService()
 
-    @patch('openai.OpenAI')
-    def test_summarize_with_emojis(self, MockOpenAI):
-        mock_client = MockOpenAI.return_value
-        mock_response = MagicMock()
-        mock_response.choices = [MagicMock()]
-        mock_response.choices[0].message.content = "Test summary. 😃"
-        mock_client.chat.completions.create.return_value = mock_response
+    def _mock_response(self, text):
+        mock_resp = MagicMock()
+        mock_resp.raise_for_status.return_value = None
+        mock_resp.json.return_value = {"choices": [{"message": {"content": text}}]}
+        return mock_resp
 
-        self.service.client = mock_client
+    @patch('ai.openai_service.requests.post')
+    def test_summarize_with_emojis(self, mock_post):
+        mock_post.return_value = self._mock_response("Test summary. 😃")
+
         summary = self.service.summarize_with_emojis("Test article")
 
         self.assertEqual(summary, "Test summary. 😃")
-        mock_client.chat.completions.create.assert_called_once()
-        call_args = mock_client.chat.completions.create.call_args
-        self.assertIn("Test article", call_args.kwargs['messages'][1]['content'])
+        mock_post.assert_called_once()
+        messages = mock_post.call_args.kwargs['json']['messages']
+        self.assertIn("Test article", messages[1]['content'])
 
-    @patch('openai.OpenAI')
-    def test_evaluate_article(self, MockOpenAI):
-        mock_client = MockOpenAI.return_value
-        mock_response = MagicMock()
-        mock_response.choices = [MagicMock()]
-        mock_response.choices[0].message.content = '{"expat_impact": 8, "event_weight": 7, "politics": 6, "timeliness": 9, "practical_utility": 5}'
-        mock_client.chat.completions.create.return_value = mock_response
+    @patch('ai.openai_service.requests.post')
+    def test_evaluate_article(self, mock_post):
+        mock_post.return_value = self._mock_response(
+            '{"expat_impact": 8, "event_weight": 7, "politics": 6, "timeliness": 9, "practical_utility": 5}'
+        )
 
-        self.service.client = mock_client
-        score = self.service.evaluate_article("Test article")
+        result = self.service.evaluate_article("Test article")
 
-        self.assertAlmostEqual(score, 7.0)
-        mock_client.chat.completions.create.assert_called_once()
+        self.assertAlmostEqual(result["score"], 7.0)
+        self.assertEqual(result["breakdown"]["expat_impact"], 8)
+        self.assertEqual(result["breakdown"]["politics"], 6)
+        mock_post.assert_called_once()
 
 class TestGeminiService(unittest.TestCase):
 
     def setUp(self):
-        # Mock genai configure and GenerativeModel
-        self.patcher_configure = patch('google.generativeai.configure')
-        self.patcher_model = patch('google.generativeai.GenerativeModel')
-        self.mock_configure = self.patcher_configure.start()
-        self.mock_model = self.patcher_model.start()
-
         self.service = GeminiService(api_key="test_key")
 
-    def tearDown(self):
-        self.patcher_configure.stop()
-        self.patcher_model.stop()
+    def _mock_response(self, text):
+        mock_resp = MagicMock()
+        mock_resp.raise_for_status.return_value = None
+        mock_resp.json.return_value = {
+            "candidates": [{
+                "content": {"parts": [{"text": text}]},
+                "finishReason": "STOP",
+            }]
+        }
+        return mock_resp
 
-    def test_summarize_with_emojis(self):
-        mock_response = MagicMock()
-        mock_response.text = "Test summary. 😃"
-        self.service.model.generate_content.return_value = mock_response
+    @patch('ai.gemini_service.requests.post')
+    def test_summarize_with_emojis(self, mock_post):
+        mock_post.return_value = self._mock_response("Test summary. 😃")
 
         summary = self.service.summarize_with_emojis("Test article")
 
         self.assertEqual(summary, "Test summary. 😃")
-        self.service.model.generate_content.assert_called_once()
-        call_args = self.service.model.generate_content.call_args
-        self.assertIn("Test article", call_args[0][0])
+        mock_post.assert_called_once()
+        sent_text = mock_post.call_args.kwargs['json']['contents'][0]['parts'][0]['text']
+        self.assertIn("Test article", sent_text)
 
-    def test_evaluate_article(self):
-        mock_response = MagicMock()
-        mock_response.text = '{"expat_impact": 8, "event_weight": 7, "politics": 6, "timeliness": 9, "practical_utility": 5}'
-        self.service.model.generate_content.return_value = mock_response
+    @patch('ai.gemini_service.requests.post')
+    def test_evaluate_article(self, mock_post):
+        mock_post.return_value = self._mock_response(
+            '{"expat_impact": 8, "event_weight": 7, "politics": 6, "timeliness": 9, "practical_utility": 5}'
+        )
 
-        score = self.service.evaluate_article("Test article")
+        result = self.service.evaluate_article("Test article")
 
-        self.assertAlmostEqual(score, 7.0)
-        self.service.model.generate_content.assert_called_once()
+        self.assertAlmostEqual(result["score"], 7.0)
+        self.assertEqual(result["breakdown"]["expat_impact"], 8)
+        self.assertEqual(result["breakdown"]["politics"], 6)
+        mock_post.assert_called_once()
 
 if __name__ == '__main__':
     unittest.main()

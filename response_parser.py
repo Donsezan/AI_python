@@ -35,25 +35,27 @@ def parse_summary_with_emojis_and_evaluate(response_text):
     return summary_text, final_score
 
 
-def parse_evaluate_article(response_text):
-    cleaned_response_text = re.sub(r'<think>.*?</think>', '', response_text, flags=re.DOTALL).strip()
-    cleaned_response_text = re.sub(r'//.*', '', cleaned_response_text)
+_EVALUATION_KEYS = ("expat_impact", "event_weight", "politics", "timeliness", "practical_utility")
 
-    cleaned_response_text = re.sub(r'^```(?:json)?\s*', '', cleaned_response_text)
-    cleaned_response_text = re.sub(r'\s*```$', '', cleaned_response_text).strip()
+
+def parse_evaluate_article(response_text):
+    """Parses the raw LLM response into {'score': float, 'breakdown': dict|None}.
+
+    Bot logic only needs `score`; `breakdown` is for dry-run analysis.
+    On JSON decode failure returns {'score': 0, 'breakdown': None}.
+    """
+    cleaned = re.sub(r'<think>.*?</think>', '', response_text, flags=re.DOTALL).strip()
+    cleaned = re.sub(r'//.*', '', cleaned)
+    cleaned = re.sub(r'^```(?:json)?\s*', '', cleaned)
+    cleaned = re.sub(r'\s*```$', '', cleaned).strip()
 
     try:
-        json_object = json.loads(cleaned_response_text)
-        expat_impact = json_object.get("expat_impact", 0)
-        event_weight = json_object.get("event_weight", 0)
-        politics_vs_innovation = json_object.get("politics", 0)
-        timeliness = json_object.get("timeliness", 0)
-        practical_utility = json_object.get("practical_utility", 0)
-
-        scores = [expat_impact, event_weight, politics_vs_innovation, timeliness, practical_utility]
-        non_zero_scores = [score for score in scores if score != 0]
-        total_score = sum(non_zero_scores) / len(non_zero_scores) if non_zero_scores else 0
-        return total_score
+        obj = json.loads(cleaned)
     except json.JSONDecodeError:
-        logger.error(f"Failed to decode JSON from response: {cleaned_response_text}")
-        return 0
+        logger.error(f"Failed to decode JSON from response: {cleaned}")
+        return {"score": 0, "breakdown": None}
+
+    breakdown = {key: obj.get(key, 0) for key in _EVALUATION_KEYS}
+    non_zero = [v for v in breakdown.values() if v != 0]
+    avg = sum(non_zero) / len(non_zero) if non_zero else 0
+    return {"score": avg, "breakdown": breakdown}

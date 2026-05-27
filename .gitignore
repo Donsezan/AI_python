@@ -30,6 +30,7 @@ chroma_db_persistence/
 
 # Logs
 *.log
+dry_run_logs/
 
 # OS metadata
 .DS_Store

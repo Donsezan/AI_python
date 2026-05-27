@@ -6,7 +6,7 @@ import requests
 
 logger = logging.getLogger(__name__)
 
-_EMBED_URL = "https://api.cohere.com/v1/embed"
+_EMBED_URL = "https://api.cohere.com/v2/embed"
 _EMBED_MODEL = "embed-multilingual-v3.0"
 
 
@@ -33,11 +33,12 @@ class DataService:
                 "texts": [text],
                 "model": _EMBED_MODEL,
                 "input_type": "search_document",
+                "embedding_types": ["float"],
             },
             timeout=20,
         )
         resp.raise_for_status()
-        return resp.json()["embeddings"][0]
+        return resp.json()["embeddings"]["float"][0]
 
     def _cosine(self, a, b):
         a, b = np.array(a), np.array(b)
