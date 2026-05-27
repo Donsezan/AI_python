@@ -1,5 +1,8 @@
 import os
+import re
+import time
 import logging
+import threading
 import requests
 from ai.base_ai_service import BaseAIService, RateLimitError
 import ai.ai_prompts as ai_prompts
@@ -7,7 +10,7 @@ import response_parser
 
 logger = logging.getLogger(__name__)
 
-_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash-lite")
 _API_URL = f"https://generativelanguage.googleapis.com/v1beta/models/{_MODEL}:generateContent"
 
 # Provider-specific sampling — kept here so other providers stay independent.
@@ -15,6 +18,9 @@ _TEMPERATURE_EVALUATE = 0.2
 _TEMPERATURE_SUMMARIZE = 0.7
 _MAX_OUTPUT_TOKENS_EVALUATE = 256
 _MAX_OUTPUT_TOKENS_SUMMARIZE = 512
+
+# Free-tier RPM caps: flash=10, flash-lite=15. 6.5s spacing keeps us safely under 10 RPM.
+_MIN_CALL_INTERVAL_SEC = float(os.getenv("GEMINI_MIN_CALL_INTERVAL_SEC", "6.5"))
 
 # Gemini's responseSchema is a subset of OpenAPI 3.0 — it rejects JSON-Schema-only
 # keywords (additionalProperties, minimum, maximum) and expects Type values in
@@ -50,25 +56,56 @@ def _wrap_article(article_text):
     return f"<article>\n{article_text}\n</article>"
 
 
-def _parse_retry_delay(payload):
-    """Extract retryDelay seconds from a Gemini error payload's RetryInfo detail."""
-    details = ((payload or {}).get("error") or {}).get("details") or []
-    for detail in details:
-        if detail.get("@type", "").endswith("/google.rpc.RetryInfo"):
-            delay = detail.get("retryDelay", "")
-            if isinstance(delay, str) and delay.endswith("s"):
-                try:
-                    return float(delay[:-1])
-                except ValueError:
-                    return None
+class GeminiRateLimitError(RateLimitError):
+    """Raised on HTTP 429. Carries Google's suggested retry delay (seconds) when provided.
+
+    Subclasses the generic ``RateLimitError`` so callers that catch the base class
+    (e.g. ``main._with_retry``) still handle Gemini rate limits uniformly.
+    """
+
+
+def _parse_retry_after(resp):
+    """Extract a retry delay (seconds) from a 429 response.
+
+    Google returns the delay either as a standard `Retry-After` header or inside the JSON body
+    under `error.details[].retryDelay` (e.g. "23s"). Returns None when neither is parseable.
+    """
+    header = resp.headers.get("Retry-After")
+    if header:
+        try:
+            return float(header)
+        except ValueError:
+            pass
+    try:
+        details = (resp.json().get("error") or {}).get("details") or []
+        for detail in details:
+            if "RetryInfo" in detail.get("@type", ""):
+                m = re.match(r"([\d.]+)s", detail.get("retryDelay", ""))
+                if m:
+                    return float(m.group(1))
+    except (ValueError, KeyError, AttributeError):
+        pass
     return None
 
 
 class GeminiService(BaseAIService):
+    _last_call_at = 0.0
+    _stagger_lock = threading.Lock()
+
     def __init__(self, api_key):
         self.api_key = api_key
 
+    def _stagger(self):
+        """Block until at least _MIN_CALL_INTERVAL_SEC has elapsed since the previous call."""
+        with GeminiService._stagger_lock:
+            wait = _MIN_CALL_INTERVAL_SEC - (time.monotonic() - GeminiService._last_call_at)
+            if wait > 0:
+                logger.debug(f"Staggering Gemini call by {wait:.2f}s")
+                time.sleep(wait)
+            GeminiService._last_call_at = time.monotonic()
+
     def _generate(self, system_prompt, user_content, *, temperature, max_output_tokens, response_schema=None):
+        self._stagger()
         generation_config = {
             "temperature": temperature,
             "maxOutputTokens": max_output_tokens,
@@ -86,15 +123,13 @@ class GeminiService(BaseAIService):
             "generationConfig": generation_config,
         }
         resp = requests.post(f"{_API_URL}?key={self.api_key}", json=body, timeout=60)
+        if resp.status_code == 429:
+            retry_after = _parse_retry_after(resp)
+            raise GeminiRateLimitError(
+                f"429 Too Many Requests for {_MODEL} (retry_after={retry_after})",
+                retry_after=retry_after,
+            )
         if not resp.ok:
-            if resp.status_code == 429:
-                try:
-                    payload = resp.json()
-                except ValueError:
-                    payload = None
-                retry_after = _parse_retry_delay(payload)
-                suffix = f", retry in {retry_after:.0f}s" if retry_after else ""
-                raise RateLimitError(f"Gemini rate limit (429){suffix}", retry_after=retry_after)
             raise RuntimeError(f"Gemini HTTP {resp.status_code}: {resp.text}")
         data = resp.json()
 

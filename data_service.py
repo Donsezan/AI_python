@@ -1,18 +1,22 @@
 import uuid
 import logging
+import time
 from datetime import datetime, timedelta
 import numpy as np
 import requests
 
 logger = logging.getLogger(__name__)
 
-_EMBED_URL = "https://api.cohere.com/v2/embed"
-_EMBED_MODEL = "embed-multilingual-v3.0"
+_EMBED_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-embedding-2:embedContent"
+_EMBED_RETRIES = 3
+_EMBED_RETRY_DELAY = 20.0
+
+_UNSET = object()
 
 
 class DataService:
 
-    def __init__(self, supabase_url, supabase_key, DISTANCE_THRESHOLD, cohere_api_key):
+    def __init__(self, supabase_url, supabase_key, DISTANCE_THRESHOLD, gemini_api_key):
         self.similarity_threshold = 1 - DISTANCE_THRESHOLD
         self.url = f"{supabase_url.rstrip('/')}/rest/v1/articles"
         self.headers = {
@@ -20,25 +24,34 @@ class DataService:
             "Authorization": f"Bearer {supabase_key}",
             "Content-Type": "application/json",
         }
-        self._cohere_api_key = cohere_api_key
+        self._gemini_api_key = gemini_api_key
 
     def _embed(self, text):
-        resp = requests.post(
-            _EMBED_URL,
-            headers={
-                "Authorization": f"Bearer {self._cohere_api_key}",
-                "Content-Type": "application/json",
-            },
-            json={
-                "texts": [text],
-                "model": _EMBED_MODEL,
-                "input_type": "search_document",
-                "embedding_types": ["float"],
-            },
-            timeout=20,
-        )
-        resp.raise_for_status()
-        return resp.json()["embeddings"]["float"][0]
+        last_exc = None
+        for attempt in range(1, _EMBED_RETRIES + 1):
+            try:
+                resp = requests.post(
+                    _EMBED_URL,
+                    headers={
+                        "x-goog-api-key": self._gemini_api_key,
+                        "Content-Type": "application/json",
+                    },
+                    json={
+                        "content": {"parts": [{"text": text}]},
+                    },
+                    timeout=20,
+                )
+                resp.raise_for_status()
+                return resp.json()["embedding"]["values"]
+            except Exception as e:
+                last_exc = e
+                if attempt < _EMBED_RETRIES:
+                    delay = _EMBED_RETRY_DELAY * (2 ** (attempt - 1))
+                    logger.warning(f"Gemini embed failed (attempt {attempt}/{_EMBED_RETRIES}): {e}. Retrying in {delay:.1f}s...")
+                    time.sleep(delay)
+                else:
+                    logger.warning(f"Gemini embed failed after {_EMBED_RETRIES} attempts: {e}")
+        raise last_exc
 
     def _cosine(self, a, b):
         a, b = np.array(a), np.array(b)
@@ -79,19 +92,21 @@ class DataService:
             else:
                 sim = self._jaccard(title, row["title"])
             if sim >= self.similarity_threshold:
-                return False
-        return True
+                return False, embedding
+        return True, embedding
 
     def is_new_article(self, title):
         rows = self.fetch_recent_articles()
-        return self.is_new_article_cached(title, rows)
+        is_new, _ = self.is_new_article_cached(title, rows)
+        return is_new
 
-    def save_article(self, title, date_time, url=None):
-        try:
-            embedding = self._embed(title)
-        except Exception as e:
-            logger.warning(f"Embedding failed, saving without embedding: {e}")
-            embedding = None
+    def save_article(self, title, date_time, url=None, embedding=_UNSET):
+        if embedding is _UNSET:
+            try:
+                embedding = self._embed(title)
+            except Exception as e:
+                logger.warning(f"Embedding failed, saving without embedding: {e}")
+                embedding = None
 
         try:
             payload = {

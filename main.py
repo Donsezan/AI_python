@@ -31,9 +31,7 @@ NEWS_URL = os.getenv('NEWS_URL')
 GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
 SUPABASE_URL = os.getenv('SUPABASE_URL')
 SUPABASE_KEY = os.getenv('SUPABASE_KEY')
-COHERE_API_KEY = os.getenv('COHERE_API_KEY')
-
-_missing = [k for k, v in {'BOT_TOKEN': BOT_TOKEN, 'CHAT_ID': CHAT_ID, 'NEWS_URL': NEWS_URL, 'GEMINI_API_KEY': GEMINI_API_KEY, 'SUPABASE_URL': SUPABASE_URL, 'SUPABASE_KEY': SUPABASE_KEY, 'COHERE_API_KEY': COHERE_API_KEY}.items() if not v]
+_missing = [k for k, v in {'BOT_TOKEN': BOT_TOKEN, 'CHAT_ID': CHAT_ID, 'NEWS_URL': NEWS_URL, 'GEMINI_API_KEY': GEMINI_API_KEY, 'SUPABASE_URL': SUPABASE_URL, 'SUPABASE_KEY': SUPABASE_KEY}.items() if not v]
 if _missing:
     raise EnvironmentError(f"Missing required environment variables: {', '.join(_missing)}")
 
@@ -41,7 +39,7 @@ if _missing:
 current_ai_provider = AIProvider.GEMINI
 
 # Initialize services
-data_service = DataService(supabase_url=SUPABASE_URL, supabase_key=SUPABASE_KEY, DISTANCE_THRESHOLD=DISTANCE_THRESHOLD, cohere_api_key=COHERE_API_KEY)
+data_service = DataService(supabase_url=SUPABASE_URL, supabase_key=SUPABASE_KEY, DISTANCE_THRESHOLD=DISTANCE_THRESHOLD, gemini_api_key=GEMINI_API_KEY)
 fetch_service = FetchingData(NEWS_URL, HEADERS)
 telegram_service = TelegramService(BOT_TOKEN, CHAT_ID)
 ai_service = AIService.get_service(provider=current_ai_provider, gemini_api_key=GEMINI_API_KEY)
@@ -64,9 +62,15 @@ def _with_retry(fn, retries=5, base_delay=20):
                 if _shutdown.wait(timeout=sleep):
                     return None
         except Exception as e:
+            retry_after = getattr(e, 'retry_after', None)
+            if retry_after is not None or '429' in str(e):
+                _rate_limited = True
             logger.warning(f"LLM error (attempt {attempt}/{retries}): {e!r}")
             if attempt < retries:
-                sleep = base_delay * (2 ** (attempt - 1)) + random.uniform(0, 1)
+                if retry_after is not None:
+                    sleep = retry_after + random.uniform(0, 1)
+                else:
+                    sleep = base_delay * (2 ** (attempt - 1)) + random.uniform(0, 1)
                 logger.info(f"Retrying in {sleep:.1f}s...")
                 if _shutdown.wait(timeout=sleep):
                     return None
@@ -106,11 +110,12 @@ def job(dry_run=False):
         if dry_run_log:
             dry_run_log.close()
     logger.info("Job finished.")
-
+ 
 
 def _process_article(title, href, known_articles, dry_run=False, dry_run_log=None):
     logger.info(f"Processing article: {title}")
-    if not data_service.is_new_article_cached(title, known_articles):
+    is_new, title_embedding = data_service.is_new_article_cached(title, known_articles)
+    if not is_new:
         logger.info(f"Article '{title}' already processed, skipping.")
         if dry_run_log:
             dry_run_log.record(title=title, url=href, status="duplicate_cached")
@@ -154,7 +159,7 @@ def _process_article(title, href, known_articles, dry_run=False, dry_run_log=Non
                 language=fetch_service.language, article_chars=len(main_content),
             )
         if not dry_run:
-            data_service.save_article(title, date_time, url=href)
+            data_service.save_article(title, date_time, url=href, embedding=title_embedding)
         return
 
     logger.info("Summarizing with emojis...")
@@ -185,7 +190,7 @@ def _process_article(title, href, known_articles, dry_run=False, dry_run_log=Non
         return
 
     logger.info("Saving article...")
-    if not data_service.save_article(title, date_time, url=href):
+    if not data_service.save_article(title, date_time, url=href, embedding=title_embedding):
         logger.warning(f"Posted '{title}' but failed to save — may duplicate next run.")
 
     if _shutdown.wait(timeout=10):
