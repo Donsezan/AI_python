@@ -5,11 +5,13 @@ A news aggregation bot that scrapes local Málaga news, evaluates article releva
 ## How It Works
 
 1. **Fetch** — Scrapes article links and content from the configured news source
-2. **Deduplicate** — Checks the article URL against Supabase first (free, in-memory); then embeds the title with Cohere and compares cosine similarity against stored embeddings; falls back to Jaccard on legacy rows
+2. **Deduplicate** — Checks the article URL against Supabase first (free, in-memory); then embeds the title with Gemini (`gemini-embedding-2`) and compares cosine similarity against stored embeddings; falls back to Jaccard on legacy rows
 3. **Evaluate** — Gemini scores each article's relevance (0–10); articles below 6 are saved to Supabase (so they are not re-evaluated next cycle) and then skipped
 4. **Summarize** — Gemini generates an emoji-rich, Telegram-ready summary
 5. **Post** — Sends media groups (up to 9 images) or plain text to the Telegram channel
 6. **Cleanup** — Daily job removes articles older than 10 days
+
+All Gemini calls are staggered (default 6.5s minimum spacing) and respect Google's `Retry-After` / `RetryInfo.retryDelay` on HTTP 429 to stay within free-tier quotas.
 
 ## Setup
 
@@ -17,8 +19,7 @@ A news aggregation bot that scrapes local Málaga news, evaluates article releva
 
 - Python 3.10+
 - A Telegram bot token and target chat/channel ID
-- A Google Gemini API key (for article evaluation and summarization)
-- A Cohere API key (for title embeddings / deduplication)
+- A Google Gemini API key (used for article evaluation, summarization, **and** title embeddings)
 - A [Supabase](https://supabase.com) project with an `articles` table:
   ```sql
   create table articles (
@@ -48,9 +49,13 @@ BOT_TOKEN=your_telegram_bot_token
 CHAT_ID=your_telegram_chat_id
 NEWS_URL=https://www.malagahoy.es/malaga/
 GEMINI_API_KEY=your_gemini_api_key
-COHERE_API_KEY=your_cohere_api_key
 SUPABASE_URL=https://your-project.supabase.co
 SUPABASE_KEY=your_supabase_anon_or_service_key
+
+# Optional
+GEMINI_MODEL=gemini-2.5-flash-lite          # default; switch to gemini-2.5-flash for higher quality
+GEMINI_MIN_CALL_INTERVAL_SEC=6.5            # min seconds between Gemini calls (rate-limit guard)
+LOG_LEVEL=INFO
 ```
 
 ## Usage
@@ -69,17 +74,24 @@ Article evaluation and summarization use Gemini by default. Switch via `current_
 
 | Provider | Model | Notes |
 |---|---|---|
-| `AIProvider.GEMINI` | `gemini-2.5-flash` | Default; uses JSON schema validation |
+| `AIProvider.GEMINI` | `gemini-2.5-flash-lite` | Default; uses JSON schema validation. Free-tier: 15 RPM / 1,000 RPD |
 | `AIProvider.OPENAI` | Any OpenAI-compatible | Also works with local LM Studio at `http://localhost:1234/v1` |
 
-Deduplication embeddings always use Cohere (`embed-multilingual-v3.0`, 1024 dimensions).
+Deduplication embeddings use Gemini (`gemini-embedding-2`) and reuse the same `GEMINI_API_KEY`. The embedding computed during the dedup check is cached in-memory and reused on save, so each article costs at most one embed call.
+
+### Rate-limit handling
+
+Gemini 429s are handled in three places:
+1. **Staggering** — every Gemini call (generation *and* embedding) is spaced by `GEMINI_MIN_CALL_INTERVAL_SEC` (default 6.5s).
+2. **`Retry-After` parsing** — on HTTP 429, `GeminiRateLimitError` carries Google's suggested delay from the `Retry-After` header or `RetryInfo.retryDelay` body field.
+3. **Job-level circuit breaker** — when a 429 fires, the current 10-minute job cycle aborts early and resumes on the next tick.
 
 ## Project Structure
 
 ```
 ├── main.py                  # Entry point, scheduler, job orchestration
 ├── fetching_data.py         # Web scraping (BeautifulSoup)
-├── data_service.py          # Supabase deduplication (Cohere embeddings + cosine similarity)
+├── data_service.py          # Supabase deduplication (Gemini embeddings + cosine similarity)
 ├── telegram_service.py      # Telegram posting (media groups + text)
 ├── response_parser.py       # JSON + regex extraction from AI responses
 ├── requirements.txt
@@ -102,7 +114,7 @@ python -m unittest tests.test_supabase_connection           # Live Supabase conn
 ```
 
 Unit tests mock all external API calls — no live credentials required for most tests.  
-`test_similarity.py` runs real Cohere API calls when `COHERE_API_KEY` is set; otherwise the API-dependent classes are skipped automatically.  
+`test_similarity.py` runs real Gemini embedding calls when `GEMINI_API_KEY` is set; otherwise the API-dependent classes are skipped automatically.  
 `test_supabase_connection.py` hits the live Supabase REST API and requires `SUPABASE_URL` and `SUPABASE_KEY`.
 
 ## Key Constants
@@ -113,5 +125,6 @@ Unit tests mock all external API calls — no live credentials required for most
 | `DISTANCE_THRESHOLD` | `0.15` | `1 - SIMILARITY_THRESHOLD` |
 | Scheduler interval | 10 min | How often `job()` runs |
 | Cleanup age | 10 days | Max age of stored articles |
-| AI retry delay | 3 min | Wait between LLM retries (3 attempts max) |
-| Embedding model | `embed-multilingual-v3.0` | Cohere model, 1024 dimensions |
+| AI retry delay | 20s base, exponential | Overridden by `Retry-After` when the server provides one (max 5 attempts) |
+| Gemini call spacing | 6.5s | Min interval between Gemini calls (`GEMINI_MIN_CALL_INTERVAL_SEC`) |
+| Embedding model | `gemini-embedding-2` | Google Gemini embedding model |
