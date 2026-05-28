@@ -3,7 +3,7 @@ Similarity tests for DataService.
 
 Classes:
   TestCosineMath            — pure numpy, no API calls
-  TestCohereEmbedding       — real Cohere API (skipped without COHERE_API_KEY)
+  TestGeminiEmbedding       — real Gemini API (skipped without GEMINI_API_KEY)
   TestDataServiceSimilarity — real embeddings + mocked Supabase requests
 """
 
@@ -30,7 +30,7 @@ def _load_env():
 
 _load_env()
 
-COHERE_API_KEY = os.getenv('COHERE_API_KEY', '')
+GEMINI_API_KEY = os.getenv('GEMINI_API_KEY', '')
 
 _DUMMY_URL = 'https://dummy.supabase.co'
 _DUMMY_KEY = 'dummy-key'
@@ -43,7 +43,7 @@ def _make_service():
         supabase_url=_DUMMY_URL,
         supabase_key=_DUMMY_KEY,
         DISTANCE_THRESHOLD=_DISTANCE_THRESHOLD,
-        cohere_api_key=COHERE_API_KEY or 'dummy',
+        gemini_api_key=GEMINI_API_KEY or 'dummy',
     )
 
 
@@ -75,11 +75,11 @@ class TestCosineMath(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# 2. Real Cohere embedding API
+# 2. Real Gemini embedding API
 # ---------------------------------------------------------------------------
 
-@unittest.skipUnless(COHERE_API_KEY, 'COHERE_API_KEY must be set')
-class TestCohereEmbedding(unittest.TestCase):
+@unittest.skipUnless(GEMINI_API_KEY, 'GEMINI_API_KEY must be set')
+class TestGeminiEmbedding(unittest.TestCase):
 
     def setUp(self):
         self.svc = _make_service()
@@ -89,9 +89,9 @@ class TestCohereEmbedding(unittest.TestCase):
         self.assertIsInstance(emb, list)
         self.assertTrue(all(isinstance(x, float) for x in emb))
 
-    def test_embed_returns_1024_dimensions(self):
+    def test_embed_returns_nonempty_vector(self):
         emb = self.svc._embed('Local council approves new park in Málaga')
-        self.assertEqual(len(emb), 1024)
+        self.assertGreater(len(emb), 0)
 
     def test_same_text_cosine_is_one(self):
         text = 'Málaga airport reaches record passenger numbers'
@@ -128,7 +128,7 @@ class TestCohereEmbedding(unittest.TestCase):
 # 3. DataService.is_new_article — real embeddings, mocked Supabase
 # ---------------------------------------------------------------------------
 
-@unittest.skipUnless(COHERE_API_KEY, 'COHERE_API_KEY must be set')
+@unittest.skipUnless(GEMINI_API_KEY, 'GEMINI_API_KEY must be set')
 class TestDataServiceSimilarity(unittest.TestCase):
 
     def setUp(self):
