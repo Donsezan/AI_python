@@ -123,10 +123,13 @@ def _process_article(title, href, known_articles, dry_run=False, dry_run_log=Non
 
     logger.info("Fetching article metadata...")
     meta = fetch_service.fetch_article(title, href)
-    if not meta:
-        logger.warning("Failed to fetch article or article is too old.")
+    if isinstance(meta, str):
+        if meta == "too_old":
+            logger.info("Article is too old, skipping.")
+        else:
+            logger.warning("Failed to fetch article.")
         if dry_run_log:
-            dry_run_log.record(title=title, url=href, status="fetch_failed_or_too_old")
+            dry_run_log.record(title=title, url=href, status=meta)
         return
     soup, date_time = meta
     main_content, images = fetch_service.parse_content(soup)
