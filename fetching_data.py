@@ -8,9 +8,10 @@ logger = logging.getLogger(__name__)
 
 
 class FetchingData:
-    def __init__(self, news_url, headers):
+    def __init__(self, news_url, headers, language='es'):
         self.news_url = news_url
         self.headers = headers
+        self.language = language
 
     def fetch_latest_articles(self):
         logger.info(f"Fetching latest articles from: {self.news_url}")
@@ -76,7 +77,12 @@ class FetchingData:
         return [url for url in unique_urls if url.endswith('.jpg') and f'_{max_resolution}w_' in url]
 
     def fetch_article(self, title, href):
-        """Fetch article page and validate date. Returns (soup, date_time) or None."""
+        """Fetch article page and validate date.
+
+        Returns (soup, date_time) on success, or a string status describing the
+        failure: "fetch_failed" (HTTP/parse error or missing required nodes) or
+        "too_old" (article date older than 7 days).
+        """
         logger.info(f"Fetching article: {title}")
         try:
             resp = requests.get(href, headers=self.headers, timeout=15)
@@ -86,33 +92,33 @@ class FetchingData:
             h1 = soup.find('h1')
             if not h1:
                 logger.warning(f"[fetch] No <h1> on {href}")
-                return None
+                return "fetch_failed"
             logger.info(f"Article title: {h1.get_text(strip=True)}")
 
             date_node = soup.find('p', class_='timestamp-atom')
             if not date_node:
                 logger.warning(f"[fetch] No timestamp on {href}")
-                return None
+                return "fetch_failed"
 
             try:
                 date_time = self._parse_spanish_date(date_node.text)
             except (ValueError, IndexError) as e:
                 logger.warning(f"[fetch] Date parse failed for {href}: {e}")
-                return None
+                return "fetch_failed"
 
             logger.info(f"Article date: {date_time}")
             if date_time < datetime.now() - timedelta(days=7):
                 logger.info("Article is older than 7 days, skipping.")
-                return None
+                return "too_old"
 
             return soup, date_time
 
         except requests.RequestException as e:
             logger.error(f"[fetch] HTTP error for {href}: {e}")
-            return None
+            return "fetch_failed"
         except Exception as e:
             logger.error(f"[fetch] Unexpected error for {href}: {e!r}")
-            return None
+            return "fetch_failed"
 
     def parse_content(self, soup):
         """Extract text content and images from an already-fetched soup object."""

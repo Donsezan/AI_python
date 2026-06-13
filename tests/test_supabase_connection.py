@@ -26,7 +26,7 @@ _load_env()
 
 SUPABASE_URL = os.getenv('SUPABASE_URL', '').rstrip('/')
 SUPABASE_KEY = os.getenv('SUPABASE_KEY', '')
-COHERE_API_KEY = os.getenv('COHERE_API_KEY', '')
+GEMINI_API_KEY = os.getenv('GEMINI_API_KEY', '')
 ARTICLES_ENDPOINT = f"{SUPABASE_URL}/rest/v1/articles"
 HEADERS = {
     "apikey": SUPABASE_KEY,
@@ -35,7 +35,7 @@ HEADERS = {
 }
 
 REQUIRED_COLUMNS = {"id", "title", "date"}
-_DUMMY_EMBEDDING = [0.1] * 1024   # matches Cohere embed-multilingual-v3.0 dimensions
+_DUMMY_EMBEDDING = [0.1] * 1024   # arbitrary fixture for jsonb round-trip; dimension is not Gemini-specific
 
 
 @unittest.skipUnless(SUPABASE_URL and SUPABASE_KEY, "SUPABASE_URL and SUPABASE_KEY must be set")
@@ -101,7 +101,7 @@ class TestSupabaseTableStructure(unittest.TestCase):
         self.assertEqual(resp.status_code, 200, f"'date' column missing: {resp.text}")
 
     def test_embedding_column_exists(self):
-        """embedding (jsonb) column must exist — required for Cohere cosine deduplication."""
+        """embedding (jsonb) column must exist — required for Gemini cosine deduplication."""
         resp = requests.get(ARTICLES_ENDPOINT, headers=HEADERS, params={"select": "embedding", "limit": "0"}, timeout=10)
         self.assertEqual(
             resp.status_code, 200,
@@ -272,11 +272,11 @@ class TestSupabaseCRUD(unittest.TestCase):
         self.assertNotIn(resp.status_code, (200, 201), "Duplicate UUID insert should be rejected by primary key constraint")
 
 
-@unittest.skipUnless(SUPABASE_URL and SUPABASE_KEY and COHERE_API_KEY,
-                     "SUPABASE_URL, SUPABASE_KEY, and COHERE_API_KEY must be set")
+@unittest.skipUnless(SUPABASE_URL and SUPABASE_KEY and GEMINI_API_KEY,
+                     "SUPABASE_URL, SUPABASE_KEY, and GEMINI_API_KEY must be set")
 class TestDataServiceDeduplication(unittest.TestCase):
     """
-    End-to-end deduplication tests using real Cohere embeddings and live Supabase.
+    End-to-end deduplication tests using real Gemini embeddings and live Supabase.
     Each test cleans up after itself.
     """
 
@@ -286,7 +286,7 @@ class TestDataServiceDeduplication(unittest.TestCase):
             supabase_url=SUPABASE_URL,
             supabase_key=SUPABASE_KEY,
             DISTANCE_THRESHOLD=0.15,
-            cohere_api_key=COHERE_API_KEY,
+            gemini_api_key=GEMINI_API_KEY,
         )
         self._inserted_ids = []
 
