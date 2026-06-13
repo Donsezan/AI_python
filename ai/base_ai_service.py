@@ -20,28 +20,19 @@ class BaseAIService(ABC):
     """
 
     @abstractmethod
-    def summarize_with_emojis(self, article_text, target_language='en', source_language='es') -> str:
+    def evaluate_and_summarize(self, article_text, source_language='es', target_language='en') -> Optional[Dict[str, Any]]:
         """
-        Summarizes the given article text with emojis.
+        Scores and summarizes the article in a single LLM call (one request per
+        article instead of two — requests, not tokens, are the scarce resource
+        on free tiers).
 
-        :param article_text: The text of the article to summarize.
+        :param article_text: The text of the article to process.
+        :param source_language: The language the article is written in (ISO 639-1 code).
         :param target_language: The target language for the summary.
-        :param source_language: The language the article is written in (ISO 639-1 code).
-        :return: The summarized text with emojis.
-        """
-        ...
-
-    @abstractmethod
-    def evaluate_article(self, article_text, source_language='es') -> Dict[str, Any]:
-        """
-        Evaluates the article based on predefined criteria.
-
-        :param article_text: The text of the article to evaluate.
-        :param source_language: The language the article is written in (ISO 639-1 code).
-        :return: {'score': float, 'breakdown': dict|None}. Bot logic uses `score`
-                 (averaged); `breakdown` exposes per-dimension integers
+        :return: {'score': float, 'breakdown': dict, 'summary': str} where
+                 `score` is the mean of the five per-dimension integers
                  (expat_impact, event_weight, politics, timeliness,
-                 practical_utility) for dry-run analysis. `breakdown` is None
-                 when the response failed to parse.
+                 practical_utility) and `summary` is the emoji-rich Telegram
+                 text. None when the response failed to parse.
         """
         ...

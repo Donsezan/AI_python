@@ -32,6 +32,10 @@ chroma_db_persistence/
 *.log
 dry_run_logs/
 
+# Runtime state
+seen_cache.json
+seen_cache.json.tmp
+
 # OS metadata
 .DS_Store
 Thumbs.db

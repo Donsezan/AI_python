@@ -14,17 +14,18 @@ _MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash-lite")
 _API_URL = f"https://generativelanguage.googleapis.com/v1beta/models/{_MODEL}:generateContent"
 
 # Provider-specific sampling — kept here so other providers stay independent.
-_TEMPERATURE_EVALUATE = 0.2
-_TEMPERATURE_SUMMARIZE = 0.7
-_MAX_OUTPUT_TOKENS_EVALUATE = 256
-_MAX_OUTPUT_TOKENS_SUMMARIZE = 512
+# Single combined call: low enough for stable integer scores, high enough
+# that the summary doesn't read like a police report.
+_TEMPERATURE = 0.4
+_MAX_OUTPUT_TOKENS = 1024
 
 # Free-tier RPM caps: flash=10, flash-lite=15. 6.5s spacing keeps us safely under 10 RPM.
 _MIN_CALL_INTERVAL_SEC = float(os.getenv("GEMINI_MIN_CALL_INTERVAL_SEC", "6.5"))
 
-# Gemini's responseSchema is a subset of OpenAPI 3.0 — it rejects JSON-Schema-only
-# keywords (additionalProperties, minimum, maximum) and expects Type values in
-# uppercase form (OBJECT, INTEGER, ...).
+# Legacy fallback only: Gemini's responseSchema is a subset of OpenAPI 3.0 — it
+# rejects JSON-Schema-only keywords (additionalProperties, minimum, maximum)
+# and expects Type values in uppercase form (OBJECT, INTEGER, ...). The primary
+# path uses responseJsonSchema, which accepts standard JSON Schema as-is.
 _GEMINI_SCHEMA_ALLOWED = {
     "type", "format", "description", "nullable", "enum",
     "maxItems", "minItems", "properties", "required",
@@ -91,6 +92,10 @@ def _parse_retry_after(resp):
 class GeminiService(BaseAIService):
     _last_call_at = 0.0
     _stagger_lock = threading.Lock()
+    # Flips to True (process-wide) if the API rejects responseJsonSchema,
+    # e.g. an older API surface — subsequent calls go straight to the
+    # sanitized legacy responseSchema format.
+    _use_legacy_schema = False
 
     def __init__(self, api_key):
         self.api_key = api_key
@@ -104,6 +109,11 @@ class GeminiService(BaseAIService):
                 time.sleep(wait)
             GeminiService._last_call_at = time.monotonic()
 
+    def _schema_config(self, response_schema):
+        if GeminiService._use_legacy_schema:
+            return {"responseSchema": _sanitize_schema(response_schema)}
+        return {"responseJsonSchema": response_schema}
+
     def _generate(self, system_prompt, user_content, *, temperature, max_output_tokens, response_schema=None):
         self._stagger()
         generation_config = {
@@ -115,7 +125,7 @@ class GeminiService(BaseAIService):
         }
         if response_schema is not None:
             generation_config["responseMimeType"] = "application/json"
-            generation_config["responseSchema"] = _sanitize_schema(response_schema)
+            generation_config.update(self._schema_config(response_schema))
 
         body = {
             "systemInstruction": {"parts": [{"text": system_prompt}]},
@@ -128,6 +138,19 @@ class GeminiService(BaseAIService):
             raise GeminiRateLimitError(
                 f"429 Too Many Requests for {_MODEL} (retry_after={retry_after})",
                 retry_after=retry_after,
+            )
+        if (
+            resp.status_code == 400
+            and response_schema is not None
+            and not GeminiService._use_legacy_schema
+            and "responseJsonSchema" in resp.text
+        ):
+            logger.warning("Gemini rejected responseJsonSchema — falling back to legacy responseSchema for this process.")
+            GeminiService._use_legacy_schema = True
+            return self._generate(
+                system_prompt, user_content,
+                temperature=temperature, max_output_tokens=max_output_tokens,
+                response_schema=response_schema,
             )
         if not resp.ok:
             raise RuntimeError(f"Gemini HTTP {resp.status_code}: {resp.text}")
@@ -149,24 +172,14 @@ class GeminiService(BaseAIService):
             raise RuntimeError("Gemini returned empty text")
         return text
 
-    def summarize_with_emojis(self, article_text, target_language='en', source_language='es'):
-        system_prompt = ai_prompts.get_summarize_with_emojis_prompt(target_language, source_language)
+    def evaluate_and_summarize(self, article_text, source_language='es', target_language='en'):
+        system_prompt = ai_prompts.get_evaluate_and_summarize_prompt(source_language, target_language)
         text = self._generate(
             system_prompt,
             _wrap_article(article_text),
-            temperature=_TEMPERATURE_SUMMARIZE,
-            max_output_tokens=_MAX_OUTPUT_TOKENS_SUMMARIZE,
-        )
-        return response_parser.parse_summary_with_emojis(text)
-
-    def evaluate_article(self, article_text, source_language='es'):
-        system_prompt = ai_prompts.get_evaluate_article_prompt(source_language)
-        text = self._generate(
-            system_prompt,
-            _wrap_article(article_text),
-            temperature=_TEMPERATURE_EVALUATE,
-            max_output_tokens=_MAX_OUTPUT_TOKENS_EVALUATE,
+            temperature=_TEMPERATURE,
+            max_output_tokens=_MAX_OUTPUT_TOKENS,
             response_schema=ai_prompts.EVALUATION_SCHEMA,
         )
         logger.debug(f"Gemini evaluate response: {text}")
-        return response_parser.parse_evaluate_article(text)
+        return response_parser.parse_evaluate_and_summarize(text)

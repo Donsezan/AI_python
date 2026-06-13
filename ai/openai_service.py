@@ -7,8 +7,7 @@ _API_URL = "http://localhost:1234/v1/chat/completions"
 _MODEL = "microsoft/phi-4-reasoning-plus"
 
 # Provider-specific sampling — kept here so other providers stay independent.
-_TEMPERATURE_EVALUATE = 0.2
-_TEMPERATURE_SUMMARIZE = 0.7
+_TEMPERATURE = 0.4
 
 
 def _wrap_article(article_text):
@@ -37,23 +36,14 @@ class OpenAIService(BaseAIService):
         resp.raise_for_status()
         return resp.json()["choices"][0]["message"]["content"]
 
-    def summarize_with_emojis(self, article_text, target_language='en', source_language='es'):
+    def evaluate_and_summarize(self, article_text, source_language='es', target_language='en'):
         messages = [
-            {"role": "system", "content": ai_prompts.get_summarize_with_emojis_prompt(target_language, source_language)},
-            {"role": "user", "content": _wrap_article(article_text)},
-        ]
-        return response_parser.parse_summary_with_emojis(
-            self._chat(messages, temperature=_TEMPERATURE_SUMMARIZE)
-        )
-
-    def evaluate_article(self, article_text, source_language='es'):
-        messages = [
-            {"role": "system", "content": ai_prompts.get_evaluate_article_prompt(source_language)},
+            {"role": "system", "content": ai_prompts.get_evaluate_and_summarize_prompt(source_language, target_language)},
             {"role": "user", "content": _wrap_article(article_text)},
         ]
         text = self._chat(
             messages,
-            temperature=_TEMPERATURE_EVALUATE,
+            temperature=_TEMPERATURE,
             response_format=_json_schema_response_format(ai_prompts.EVALUATION_SCHEMA),
         )
-        return response_parser.parse_evaluate_article(text)
+        return response_parser.parse_evaluate_and_summarize(text)

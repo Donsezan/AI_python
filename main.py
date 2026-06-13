@@ -1,6 +1,7 @@
 import os
 import sys
 import signal
+import hashlib
 import threading
 import random
 import logging
@@ -11,6 +12,7 @@ from fetching_data import FetchingData
 from ai.ai_service import AIService
 from telegram_service import TelegramService
 from data_service import DataService
+from seen_cache import SeenCache
 from ai.ai_provider import AIProvider
 from ai.base_ai_service import RateLimitError
 from dry_run_logger import DryRunLogger
@@ -25,6 +27,8 @@ logger = logging.getLogger(__name__)
 HEADERS = {"User-Agent": "Mozilla/5.0"}
 SIMILARITY_THRESHOLD = 0.85
 DISTANCE_THRESHOLD = 1 - SIMILARITY_THRESHOLD
+SCORE_THRESHOLD = 6
+MAX_POST_ATTEMPTS = 3
 BOT_TOKEN = os.getenv('BOT_TOKEN')
 CHAT_ID = os.getenv('CHAT_ID')
 NEWS_URL = os.getenv('NEWS_URL')
@@ -43,9 +47,15 @@ data_service = DataService(supabase_url=SUPABASE_URL, supabase_key=SUPABASE_KEY,
 fetch_service = FetchingData(NEWS_URL, HEADERS)
 telegram_service = TelegramService(BOT_TOKEN, CHAT_ID)
 ai_service = AIService.get_service(provider=current_ai_provider, gemini_api_key=GEMINI_API_KEY)
+seen_cache = SeenCache()
 
 _shutdown = threading.Event()
 _rate_limited = False  # circuit breaker: True when Gemini returns 429
+_last_articles_hash = None  # homepage fingerprint of the last cleanly-completed cycle
+# Telegram-post payloads waiting for retry: href -> {message, images, title,
+# date_time, embedding, attempts}. The LLM work is already paid for, so a
+# failed post must never trigger a re-evaluation.
+_pending_posts = {}
 
 
 def _with_retry(fn, retries=5, base_delay=20):
@@ -77,26 +87,78 @@ def _with_retry(fn, retries=5, base_delay=20):
     return None
 
 
+def _retry_pending_posts():
+    """Re-send posts that failed on Telegram's side — no LLM calls involved."""
+    for href in list(_pending_posts):
+        if _shutdown.is_set():
+            return
+        pending = _pending_posts[href]
+        attempt = pending["attempts"] + 1
+        logger.info(f"Retrying Telegram post for '{pending['title']}' (attempt {attempt}/{MAX_POST_ATTEMPTS})")
+        if telegram_service.post_to_telegram(pending["message"], pending["images"], href):
+            _finalize_posted(pending["title"], pending["date_time"], href, pending["embedding"])
+            del _pending_posts[href]
+        else:
+            pending["attempts"] = attempt
+            if attempt >= MAX_POST_ATTEMPTS:
+                logger.error(f"Giving up on posting '{pending['title']}' after {MAX_POST_ATTEMPTS} attempts.")
+                seen_cache.record_terminal(href, "post_failed")
+                del _pending_posts[href]
+
+
+def _finalize_posted(title, date_time, href, embedding, known_articles=None):
+    """Persist a successfully posted article; fall back to the seen-cache so a
+    Supabase hiccup can't cause a duplicate post next cycle."""
+    if data_service.save_article(title, date_time, url=href, embedding=embedding):
+        if known_articles is not None:
+            known_articles.append({"title": title, "url": href, "embedding": embedding})
+    else:
+        logger.warning(f"Posted '{title}' but failed to save — recording in seen-cache to prevent a duplicate post.")
+        seen_cache.record_terminal(href, "posted")
+
+
 def job(dry_run=False):
-    global _rate_limited
+    global _rate_limited, _last_articles_hash
     _rate_limited = False
     dry_run_log = DryRunLogger() if dry_run else None
+
+    if not dry_run:
+        _retry_pending_posts()
+
     logger.info("Fetching latest articles...")
-    new_articles = fetch_service.fetch_latest_articles()
-    logger.info(f"Found {len(new_articles)} new articles.")
+    new_articles = [
+        (title, href) for title, href in fetch_service.fetch_latest_articles()
+        if href and len(title.strip()) >= 20
+    ]
+    logger.info(f"Found {len(new_articles)} candidate articles.")
+    if not new_articles:
+        if dry_run_log:
+            dry_run_log.close()
+        return
+
+    # Free short-circuit: if the homepage shows exactly the same articles as the
+    # last fully-completed cycle, there is nothing new to do.
+    articles_hash = hashlib.sha1(repr(new_articles).encode("utf-8")).hexdigest()
+    if not dry_run and articles_hash == _last_articles_hash:
+        logger.info("Homepage unchanged since last completed cycle — skipping.")
+        return
+
     known_articles = data_service.fetch_recent_articles()
+    completed = True
     try:
         for title, href in new_articles:
             if _shutdown.is_set():
+                completed = False
                 break
             if _rate_limited:
                 logger.warning("Gemini rate-limited — aborting job cycle early, will retry next run.")
+                completed = False
                 break
-            if not href or len(title.strip()) < 20:
-                logger.debug(f"Skipping invalid article entry: '{title}'")
-                continue
             if data_service.is_url_seen(href, known_articles):
-                logger.info(f"Skipping already-seen URL: {href}")
+                logger.debug(f"Skipping already-seen URL: {href}")
+                continue
+            if seen_cache.should_skip(href):
+                logger.debug(f"Skipping cached terminal URL: {href}")
                 continue
             try:
                 _process_article(title, href, known_articles, dry_run=dry_run, dry_run_log=dry_run_log)
@@ -104,30 +166,35 @@ def job(dry_run=False):
                 logger.error(f"[job] Article '{title}' failed: {e!r}")
                 if dry_run_log:
                     dry_run_log.record(title=title, url=href, status="exception", error=repr(e))
+                elif not _rate_limited:
+                    seen_cache.record_attempt(href, "exception")
             if _shutdown.wait(timeout=5):
+                completed = False
                 break
     finally:
         if dry_run_log:
             dry_run_log.close()
+        seen_cache.flush_if_dirty()
+    if completed and not _rate_limited and not dry_run:
+        _last_articles_hash = articles_hash
     logger.info("Job finished.")
- 
+
 
 def _process_article(title, href, known_articles, dry_run=False, dry_run_log=None):
+    """Pipeline ordered cheapest-first: free HTTP/date/content checks, then one
+    embedding call for dedup, then a single combined evaluate+summarize call."""
     logger.info(f"Processing article: {title}")
-    is_new, title_embedding = data_service.is_new_article_cached(title, known_articles)
-    if not is_new:
-        logger.info(f"Article '{title}' already processed, skipping.")
-        if dry_run_log:
-            dry_run_log.record(title=title, url=href, status="duplicate_cached")
-        return
-
     logger.info("Fetching article metadata...")
     meta = fetch_service.fetch_article(title, href)
     if isinstance(meta, str):
         if meta == "too_old":
             logger.info("Article is too old, skipping.")
+            if not dry_run:
+                seen_cache.record_terminal(href, "too_old")
         else:
             logger.warning("Failed to fetch article.")
+            if not dry_run:
+                seen_cache.record_attempt(href, meta)
         if dry_run_log:
             dry_run_log.record(title=title, url=href, status=meta)
         return
@@ -136,25 +203,41 @@ def _process_article(title, href, known_articles, dry_run=False, dry_run_log=Non
 
     if not main_content:
         logger.warning("Article content is missing.")
+        if not dry_run:
+            seen_cache.record_terminal(href, "no_content")
         if dry_run_log:
             dry_run_log.record(title=title, url=href, status="no_content")
         return
 
-    logger.info("Evaluating main content...")
-    eval_result = _with_retry(lambda: ai_service.evaluate_article(main_content, fetch_service.language))
-    article_score = eval_result["score"] if eval_result else None
-    breakdown = eval_result["breakdown"] if eval_result else None
-    if not article_score:
-        logger.warning(f"Failed to evaluate article '{title}'. Skipping.")
+    is_new, title_embedding = data_service.is_new_article_cached(title, known_articles)
+    if not is_new:
+        logger.info(f"Article '{title}' already processed, skipping.")
+        if not dry_run:
+            seen_cache.record_terminal(href, "duplicate")
+        if dry_run_log:
+            dry_run_log.record(title=title, url=href, status="duplicate_cached")
+        return
+
+    logger.info("Evaluating and summarizing article...")
+    result = _with_retry(lambda: ai_service.evaluate_and_summarize(
+        main_content, source_language=fetch_service.language, target_language='en'))
+    if result is None or not result["summary"]:
+        status = "evaluate_failed" if result is None else "summary_failed"
+        logger.warning(f"LLM processing failed ({status}) for '{title}'. Skipping.")
+        if not dry_run and not _rate_limited:
+            seen_cache.record_attempt(href, status)
         if dry_run_log:
             dry_run_log.record(
-                title=title, url=href, status="evaluate_failed",
+                title=title, url=href, status=status,
                 language=fetch_service.language, article_chars=len(main_content),
             )
         return
+    article_score = result["score"]
+    breakdown = result["breakdown"]
+    summary = result["summary"]
 
-    logger.info(f"Article score: {article_score}")
-    if article_score < 6:
+    logger.info(f"Article score: {article_score:.1f}")
+    if article_score < SCORE_THRESHOLD:
         logger.info(f"Article '{title}' scored {article_score:.1f}, below threshold. Skipping.")
         if dry_run_log:
             dry_run_log.record(
@@ -162,42 +245,33 @@ def _process_article(title, href, known_articles, dry_run=False, dry_run_log=Non
                 language=fetch_service.language, article_chars=len(main_content),
             )
         if not dry_run:
-            data_service.save_article(title, date_time, url=href, embedding=title_embedding)
-        return
-
-    logger.info("Summarizing with emojis...")
-    evaluated_content = _with_retry(lambda: ai_service.summarize_with_emojis(main_content, target_language='en', source_language=fetch_service.language))
-
-    if not evaluated_content or not evaluated_content.strip():
-        logger.warning(f"Failed to summarize article '{title}' with emojis. Skipping.")
-        if dry_run_log:
-            dry_run_log.record(
-                title=title, url=href, status="summary_failed", score=article_score, breakdown=breakdown,
-                language=fetch_service.language, article_chars=len(main_content),
-            )
+            if data_service.save_article(title, date_time, url=href, embedding=title_embedding):
+                known_articles.append({"title": title, "url": href, "embedding": title_embedding})
+            else:
+                seen_cache.record_attempt(href, "save_failed")
         return
 
     if dry_run:
         if dry_run_log:
             dry_run_log.record(
                 title=title, url=href, status="evaluated_above_threshold",
-                score=article_score, breakdown=breakdown, summary=evaluated_content,
+                score=article_score, breakdown=breakdown, summary=summary,
                 language=fetch_service.language, article_chars=len(main_content),
             )
         return
 
     logger.info("Posting to Telegram...")
-    result_of_post = telegram_service.post_to_telegram(f"<b>{title}</b>\n\n{evaluated_content}", images, href)
-    if not result_of_post:
-        logger.error(f"Failed to post article '{title}' to Telegram, will retry next cycle.")
+    message = f"<b>{title}</b>\n\n{summary}"
+    if not telegram_service.post_to_telegram(message, images, href):
+        logger.error(f"Failed to post article '{title}' to Telegram — queued for retry without re-evaluation.")
+        _pending_posts[href] = {
+            "message": message, "images": images, "title": title,
+            "date_time": date_time, "embedding": title_embedding, "attempts": 1,
+        }
         return
 
     logger.info("Saving article...")
-    if not data_service.save_article(title, date_time, url=href, embedding=title_embedding):
-        logger.warning(f"Posted '{title}' but failed to save — may duplicate next run.")
-
-    if _shutdown.wait(timeout=10):
-        return
+    _finalize_posted(title, date_time, href, title_embedding, known_articles)
 
 
 def _handle_signal(signum, _frame):
@@ -211,8 +285,8 @@ if __name__ == "__main__":
 
     dry_run = '--dry-run' in sys.argv
     job(dry_run=dry_run)
-    # if dry_run:
-    #     sys.exit(0)
+    if dry_run:
+        sys.exit(0)
 
     next_job = datetime.now() + timedelta(minutes=10)
     last_cleanup_day = date.today()
@@ -221,7 +295,7 @@ if __name__ == "__main__":
         if _shutdown.wait(timeout=60):
             break
         now = datetime.now()
-        logger.info(f"Scheduler tick at {now.strftime('%Y-%m-%d %H:%M:%S')}")
+        logger.debug(f"Scheduler tick at {now.strftime('%Y-%m-%d %H:%M:%S')}")
 
         if now.date() > last_cleanup_day:
             try:

@@ -45,7 +45,10 @@ NEWS_URL=...
 GEMINI_API_KEY=...
 SUPABASE_URL=...
 SUPABASE_KEY=...
-COHERE_API_KEY=...
+# Optional:
+# GEMINI_MODEL=gemini-2.5-flash-lite
+# GEMINI_MIN_CALL_INTERVAL_SEC=6.5
+# LOG_LEVEL=INFO
 ```
 
 Save with `Ctrl+X` → `Y` → `Enter`.
@@ -74,13 +77,19 @@ Paste the following (replace `YOUR_REPO` with your actual folder name):
 [Unit]
 Description=News Bot
 After=network.target
+# Stop restart-looping if the bot crashes 5 times within 10 minutes
+# (e.g. a missing .env variable raises at startup)
+StartLimitIntervalSec=600
+StartLimitBurst=5
 
 [Service]
 User=ubuntu
 WorkingDirectory=/home/ubuntu/YOUR_REPO
 ExecStart=/home/ubuntu/YOUR_REPO/.venv/bin/python main.py
-Restart=always
-RestartSec=10
+Restart=on-failure
+RestartSec=30
+# Keep a runaway process from eating the Always Free instance's RAM
+MemoryMax=512M
 
 [Install]
 WantedBy=multi-user.target
