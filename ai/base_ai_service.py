@@ -20,19 +20,22 @@ class BaseAIService(ABC):
     """
 
     @abstractmethod
-    def evaluate_and_summarize(self, article_text, source_language='es', target_language='en') -> Optional[Dict[str, Any]]:
+    def evaluate_and_summarize(self, article_text, title, source_language='es', target_language='en') -> Optional[Dict[str, Any]]:
         """
         Scores and summarizes the article in a single LLM call (one request per
         article instead of two — requests, not tokens, are the scarce resource
         on free tiers).
 
         :param article_text: The text of the article to process.
+        :param title: The article's original (source-language) headline; the model
+                      translates it into the target language for the ``title`` field.
         :param source_language: The language the article is written in (ISO 639-1 code).
-        :param target_language: The target language for the summary.
-        :return: {'score': float, 'breakdown': dict, 'summary': str} where
-                 `score` is the mean of the five per-dimension integers
+        :param target_language: The target language for the title and summary.
+        :return: {'score': float, 'breakdown': dict, 'summary': str, 'title': str}
+                 where `score` is the mean of the five per-dimension integers
                  (expat_impact, event_weight, politics, timeliness,
-                 practical_utility) and `summary` is the emoji-rich Telegram
-                 text. None when the response failed to parse.
+                 practical_utility), `summary` is the emoji-rich Telegram text,
+                 and `title` is the headline rewritten in the target language.
+                 None when the response failed to parse.
         """
         ...

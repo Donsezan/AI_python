@@ -10,8 +10,9 @@ _MODEL = "microsoft/phi-4-reasoning-plus"
 _TEMPERATURE = 0.4
 
 
-def _wrap_article(article_text):
-    return f"<article>\n{article_text}\n</article>"
+def _wrap_article(article_text, title=None):
+    head = f"<title>\n{title}\n</title>\n" if title else ""
+    return f"{head}<article>\n{article_text}\n</article>"
 
 
 def _json_schema_response_format(schema, name="article_evaluation"):
@@ -36,10 +37,10 @@ class OpenAIService(BaseAIService):
         resp.raise_for_status()
         return resp.json()["choices"][0]["message"]["content"]
 
-    def evaluate_and_summarize(self, article_text, source_language='es', target_language='en'):
+    def evaluate_and_summarize(self, article_text, title, source_language='es', target_language='en'):
         messages = [
             {"role": "system", "content": ai_prompts.get_evaluate_and_summarize_prompt(source_language, target_language)},
-            {"role": "user", "content": _wrap_article(article_text)},
+            {"role": "user", "content": _wrap_article(article_text, title)},
         ]
         text = self._chat(
             messages,

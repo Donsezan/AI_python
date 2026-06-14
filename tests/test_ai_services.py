@@ -11,7 +11,7 @@ from ai.gemini_service import GeminiService, GeminiRateLimitError
 
 _VALID_JSON = (
     '{"expat_impact": 8, "event_weight": 7, "politics": 6, "timeliness": 9, '
-    '"practical_utility": 5, "summary": "Test summary. \U0001F603"}'
+    '"practical_utility": 5, "title": "Test headline", "summary": "Test summary. \U0001F603"}'
 )
 
 
@@ -30,21 +30,23 @@ class TestOpenAIService(unittest.TestCase):
     def test_evaluate_and_summarize(self, mock_post):
         mock_post.return_value = self._mock_response(_VALID_JSON)
 
-        result = self.service.evaluate_and_summarize("Test article")
+        result = self.service.evaluate_and_summarize("Test article", "Titulo de prueba")
 
         self.assertAlmostEqual(result["score"], 7.0)
         self.assertEqual(result["breakdown"]["expat_impact"], 8)
         self.assertEqual(result["breakdown"]["politics"], 6)
         self.assertEqual(result["summary"], "Test summary. \U0001F603")
+        self.assertEqual(result["title"], "Test headline")
         mock_post.assert_called_once()
         messages = mock_post.call_args.kwargs['json']['messages']
         self.assertIn("Test article", messages[1]['content'])
+        self.assertIn("Titulo de prueba", messages[1]['content'])
 
     @patch('ai.openai_service.requests.post')
     def test_evaluate_and_summarize_invalid_json(self, mock_post):
         mock_post.return_value = self._mock_response("not json at all")
 
-        self.assertIsNone(self.service.evaluate_and_summarize("Test article"))
+        self.assertIsNone(self.service.evaluate_and_summarize("Test article", "Titulo"))
 
 
 class TestGeminiService(unittest.TestCase):
@@ -71,18 +73,21 @@ class TestGeminiService(unittest.TestCase):
     def test_evaluate_and_summarize(self, mock_post):
         mock_post.return_value = self._mock_response(_VALID_JSON)
 
-        result = self.service.evaluate_and_summarize("Test article")
+        result = self.service.evaluate_and_summarize("Test article", "Titulo de prueba")
 
         self.assertAlmostEqual(result["score"], 7.0)
         self.assertEqual(result["breakdown"]["expat_impact"], 8)
         self.assertEqual(result["summary"], "Test summary. \U0001F603")
+        self.assertEqual(result["title"], "Test headline")
         mock_post.assert_called_once()
         body = mock_post.call_args.kwargs['json']
         self.assertIn("Test article", body['contents'][0]['parts'][0]['text'])
+        self.assertIn("Titulo de prueba", body['contents'][0]['parts'][0]['text'])
         # Primary path uses the standard-JSON-Schema field, schema unmodified.
         config = body['generationConfig']
         self.assertIn('responseJsonSchema', config)
         self.assertIn('summary', config['responseJsonSchema']['properties'])
+        self.assertIn('title', config['responseJsonSchema']['properties'])
         self.assertEqual(config['thinkingConfig']['thinkingBudget'], 0)
 
     @patch('ai.gemini_service.time.sleep')
@@ -94,7 +99,7 @@ class TestGeminiService(unittest.TestCase):
         rejected.text = 'Unknown name "responseJsonSchema" in generation_config'
         mock_post.side_effect = [rejected, self._mock_response(_VALID_JSON)]
 
-        result = self.service.evaluate_and_summarize("Test article")
+        result = self.service.evaluate_and_summarize("Test article", "Titulo")
 
         self.assertAlmostEqual(result["score"], 7.0)
         self.assertEqual(mock_post.call_count, 2)
@@ -114,7 +119,7 @@ class TestGeminiService(unittest.TestCase):
         mock_post.return_value = resp_429
 
         with self.assertRaises(GeminiRateLimitError) as ctx:
-            self.service.evaluate_and_summarize("Test article")
+            self.service.evaluate_and_summarize("Test article", "Titulo")
         self.assertEqual(ctx.exception.retry_after, 17.0)
 
 

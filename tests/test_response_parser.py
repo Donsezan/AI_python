@@ -12,11 +12,19 @@ class TestParseEvaluateAndSummarize(unittest.TestCase):
     def test_valid_response(self):
         result = response_parser.parse_evaluate_and_summarize(
             '{"expat_impact": 8, "event_weight": 7, "politics": 6, "timeliness": 9, '
-            '"practical_utility": 5, "summary": "Hello. \U0001F603"}'
+            '"practical_utility": 5, "title": "Hello headline", "summary": "Hello. \U0001F603"}'
         )
         self.assertAlmostEqual(result["score"], 7.0)
         self.assertEqual(result["breakdown"]["timeliness"], 9)
         self.assertEqual(result["summary"], "Hello. \U0001F603")
+        self.assertEqual(result["title"], "Hello headline")
+
+    def test_missing_title_defaults_to_empty(self):
+        result = response_parser.parse_evaluate_and_summarize(
+            '{"expat_impact": 5, "event_weight": 5, "politics": 5, "timeliness": 5, '
+            '"practical_utility": 5, "summary": "s"}'
+        )
+        self.assertEqual(result["title"], "")
 
     def test_politics_zero_lowers_average(self):
         # A 0 must count against the score, not be excluded from the mean.

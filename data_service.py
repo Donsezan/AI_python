@@ -100,7 +100,7 @@ class DataService:
         is_new, _ = self.is_new_article_cached(title, rows)
         return is_new
 
-    def save_article(self, title, date_time, url=None, embedding=_UNSET):
+    def save_article(self, title, date_time, url=None, embedding=_UNSET, translated_title=None):
         if embedding is _UNSET:
             try:
                 embedding = self._embed(title)
@@ -117,6 +117,8 @@ class DataService:
             }
             if url:
                 payload["url"] = url
+            if translated_title:
+                payload["title_translated"] = translated_title
             resp = requests.post(
                 self.url,
                 headers=self.headers,

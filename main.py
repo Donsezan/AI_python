@@ -53,8 +53,8 @@ _shutdown = threading.Event()
 _rate_limited = False  # circuit breaker: True when Gemini returns 429
 _last_articles_hash = None  # homepage fingerprint of the last cleanly-completed cycle
 # Telegram-post payloads waiting for retry: href -> {message, images, title,
-# date_time, embedding, attempts}. The LLM work is already paid for, so a
-# failed post must never trigger a re-evaluation.
+# date_time, embedding, translated_title, attempts}. The LLM work is already
+# paid for, so a failed post must never trigger a re-evaluation.
 _pending_posts = {}
 
 
@@ -96,7 +96,8 @@ def _retry_pending_posts():
         attempt = pending["attempts"] + 1
         logger.info(f"Retrying Telegram post for '{pending['title']}' (attempt {attempt}/{MAX_POST_ATTEMPTS})")
         if telegram_service.post_to_telegram(pending["message"], pending["images"], href):
-            _finalize_posted(pending["title"], pending["date_time"], href, pending["embedding"])
+            _finalize_posted(pending["title"], pending["date_time"], href, pending["embedding"],
+                             translated_title=pending.get("translated_title"))
             del _pending_posts[href]
         else:
             pending["attempts"] = attempt
@@ -106,10 +107,10 @@ def _retry_pending_posts():
                 del _pending_posts[href]
 
 
-def _finalize_posted(title, date_time, href, embedding, known_articles=None):
+def _finalize_posted(title, date_time, href, embedding, known_articles=None, translated_title=None):
     """Persist a successfully posted article; fall back to the seen-cache so a
     Supabase hiccup can't cause a duplicate post next cycle."""
-    if data_service.save_article(title, date_time, url=href, embedding=embedding):
+    if data_service.save_article(title, date_time, url=href, embedding=embedding, translated_title=translated_title):
         if known_articles is not None:
             known_articles.append({"title": title, "url": href, "embedding": embedding})
     else:
@@ -220,7 +221,7 @@ def _process_article(title, href, known_articles, dry_run=False, dry_run_log=Non
 
     logger.info("Evaluating and summarizing article...")
     result = _with_retry(lambda: ai_service.evaluate_and_summarize(
-        main_content, source_language=fetch_service.language, target_language='en'))
+        main_content, title, source_language=fetch_service.language, target_language='en'))
     if result is None or not result["summary"]:
         status = "evaluate_failed" if result is None else "summary_failed"
         logger.warning(f"LLM processing failed ({status}) for '{title}'. Skipping.")
@@ -235,6 +236,9 @@ def _process_article(title, href, known_articles, dry_run=False, dry_run_log=Non
     article_score = result["score"]
     breakdown = result["breakdown"]
     summary = result["summary"]
+    # Headline rewritten in the target language; fall back to the original
+    # scraped headline if the model omitted it, so the post is never title-less.
+    translated_title = result["title"] or title
 
     logger.info(f"Article score: {article_score:.1f}")
     if article_score < SCORE_THRESHOLD:
@@ -242,10 +246,12 @@ def _process_article(title, href, known_articles, dry_run=False, dry_run_log=Non
         if dry_run_log:
             dry_run_log.record(
                 title=title, url=href, status="below_threshold", score=article_score, breakdown=breakdown,
+                translated_title=translated_title,
                 language=fetch_service.language, article_chars=len(main_content),
             )
         if not dry_run:
-            if data_service.save_article(title, date_time, url=href, embedding=title_embedding):
+            if data_service.save_article(title, date_time, url=href, embedding=title_embedding,
+                                         translated_title=translated_title):
                 known_articles.append({"title": title, "url": href, "embedding": title_embedding})
             else:
                 seen_cache.record_attempt(href, "save_failed")
@@ -256,22 +262,24 @@ def _process_article(title, href, known_articles, dry_run=False, dry_run_log=Non
             dry_run_log.record(
                 title=title, url=href, status="evaluated_above_threshold",
                 score=article_score, breakdown=breakdown, summary=summary,
+                translated_title=translated_title,
                 language=fetch_service.language, article_chars=len(main_content),
             )
         return
 
     logger.info("Posting to Telegram...")
-    message = f"<b>{title}</b>\n\n{summary}"
+    message = f"<b>{translated_title}</b>\n\n{summary}"
     if not telegram_service.post_to_telegram(message, images, href):
         logger.error(f"Failed to post article '{title}' to Telegram — queued for retry without re-evaluation.")
         _pending_posts[href] = {
             "message": message, "images": images, "title": title,
-            "date_time": date_time, "embedding": title_embedding, "attempts": 1,
+            "date_time": date_time, "embedding": title_embedding,
+            "translated_title": translated_title, "attempts": 1,
         }
         return
 
     logger.info("Saving article...")
-    _finalize_posted(title, date_time, href, title_embedding, known_articles)
+    _finalize_posted(title, date_time, href, title_embedding, known_articles, translated_title)
 
 
 def _handle_signal(signum, _frame):

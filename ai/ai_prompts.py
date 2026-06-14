@@ -30,9 +30,10 @@ EVALUATION_SCHEMA = {
         "politics": {"type": "integer", "minimum": 0, "maximum": 10, "description": "Non-political/innovation score (0=political, 10=non-political/innovative)"},
         "timeliness": {"type": "integer", "minimum": 1, "maximum": 10, "description": "Time-sensitivity or urgency (1-10)"},
         "practical_utility": {"type": "integer", "minimum": 1, "maximum": 10, "description": "Usefulness for reader's daily life (1-10)"},
+        "title": {"type": "string", "description": "The article's headline rewritten in the target language — a concise, faithful headline, not a summary"},
         "summary": {"type": "string", "description": "3-4 sentence summary in the target language, slightly sarcastic or humorous where appropriate, ending with 1-3 emojis matching the tone"},
     },
-    "required": ["expat_impact", "event_weight", "politics", "timeliness", "practical_utility", "summary"],
+    "required": ["expat_impact", "event_weight", "politics", "timeliness", "practical_utility", "title", "summary"],
     "additionalProperties": False,
 }
 
@@ -51,21 +52,21 @@ Examples:
 <article>
 Ryanair anuncia una nueva ruta directa entre el aeropuerto de Malaga-Costa del Sol y Berlin, con cuatro vuelos semanales a partir del 28 de octubre. Los billetes saldran a la venta esta semana desde 24,99 euros.
 </article>
-<output>{"expat_impact": 9, "event_weight": 7, "politics": 10, "timeliness": 8, "practical_utility": 9, "summary": "Ryanair is launching a direct Malaga-Berlin route with four weekly flights from 28 October. Tickets go on sale this week from a wallet-friendly 24.99 euros, so your excuses for skipping that Berlin weekend are officially gone. ✈️🇩🇪"}</output>
+<output>{"expat_impact": 9, "event_weight": 7, "politics": 10, "timeliness": 8, "practical_utility": 9, "title": "Ryanair launches direct Malaga-Berlin route from 28 October", "summary": "Ryanair is launching a direct Malaga-Berlin route with four weekly flights from 28 October. Tickets go on sale this week from a wallet-friendly 24.99 euros, so your excuses for skipping that Berlin weekend are officially gone. ✈️🇩🇪"}</output>
 </example>
 
 <example>
 <article>
 El PP de Malaga acusa al PSOE de "bloquear" la comision municipal de hacienda tras la ausencia de tres concejales socialistas en la sesion del martes. El portavoz socialista ha respondido calificando las declaraciones de "cortina de humo".
 </article>
-<output>{"expat_impact": 2, "event_weight": 2, "politics": 1, "timeliness": 4, "practical_utility": 1, "summary": "Malaga's PP accuses the PSOE of blocking the municipal finance committee after three socialist councillors skipped Tuesday's session. The socialists call it all a smoke screen — in other words, a perfectly ordinary day in local politics. 🎭"}</output>
+<output>{"expat_impact": 2, "event_weight": 2, "politics": 1, "timeliness": 4, "practical_utility": 1, "title": "Malaga's PP accuses PSOE of blocking the municipal finance committee", "summary": "Malaga's PP accuses the PSOE of blocking the municipal finance committee after three socialist councillors skipped Tuesday's session. The socialists call it all a smoke screen — in other words, a perfectly ordinary day in local politics. 🎭"}</output>
 </example>
 
 <example>
 <article>
 La AEMET activa el aviso naranja por lluvias torrenciales en la provincia de Malaga para este jueves, con acumulados que podrian superar los 80 litros por metro cuadrado en cuatro horas. El 112 recomienda evitar desplazamientos no esenciales y los ayuntamientos de la costa cierran parques y playas.
 </article>
-<output>{"expat_impact": 8, "event_weight": 6, "politics": 10, "timeliness": 10, "practical_utility": 10, "summary": "AEMET has issued an orange alert for torrential rain in Malaga province this Thursday, with up to 80 litres per square metre possible in just four hours. Emergency services advise skipping non-essential trips, and coastal towns are closing parks and beaches — a good day to admire the weather from your sofa. 🌧️⚠️"}</output>
+<output>{"expat_impact": 8, "event_weight": 6, "politics": 10, "timeliness": 10, "practical_utility": 10, "title": "AEMET issues orange alert for torrential rain in Malaga on Thursday", "summary": "AEMET has issued an orange alert for torrential rain in Malaga province this Thursday, with up to 80 litres per square metre possible in just four hours. Emergency services advise skipping non-essential trips, and coastal towns are closing parks and beaches — a good day to admire the weather from your sofa. 🌧️⚠️"}</output>
 </example>
 """.strip()
 
@@ -76,6 +77,7 @@ def get_evaluate_and_summarize_prompt(source_language='es', target_language='en'
     return (
         "You are a news evaluation agent. Your role is to score local news stories based on how likely they are to interest "
         f"a general audience, especially international readers and expats in Malaga, and to summarize them. The article is written in {source_lang}.\n\n"
+        f"In the \"title\" field, rewrite the article's headline in {target_lang} as a concise, faithful headline (not a summary, no emojis).\n\n"
         f"In the \"summary\" field, summarize the article with details in 3-4 sentences in {target_lang}, "
         "with a slightly sarcastic or humorous style where appropriate. End the summary with 1-3 emojis that match the tone of the news.\n\n"
         f"{_EVALUATE_FEW_SHOT}\n\n"

@@ -23,12 +23,16 @@ class DryRunLogger:
         logger.info(f"[dry-run] Logging results to {self.path}")
 
     def record(self, *, title, url, status, score=None, breakdown=None, summary=None,
-               language=None, article_chars=None, error=None):
+               translated_title=None, language=None, article_chars=None, error=None):
         """Append one article result and persist atomically.
 
         status values: 'evaluated_above_threshold', 'below_threshold',
         'evaluate_failed', 'summary_failed', 'fetch_failed', 'too_old',
         'no_content', 'duplicate_cached'.
+
+        title: the original (source-language) headline.
+        translated_title: the headline rewritten in the target language by the
+        LLM (present once the article reaches evaluation).
 
         breakdown: per-dimension scores dict (expat_impact, event_weight,
         politics, timeliness, practical_utility) — critical for analyzing
@@ -37,6 +41,7 @@ class DryRunLogger:
         self._records.append({
             "ts": datetime.now(timezone.utc).isoformat(),
             "title": title,
+            "translated_title": translated_title,
             "url": url,
             "status": status,
             "score": score,

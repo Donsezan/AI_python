@@ -242,6 +242,35 @@ class TestSupabaseCRUD(unittest.TestCase):
         self.assertEqual(len(stored), 1024, f"Expected 1024 dimensions, got {len(stored)}")
         self.assertAlmostEqual(stored[0], _DUMMY_EMBEDDING[0], places=6)
 
+    def test_insert_and_read_translated_title(self):
+        """title_translated must survive a Supabase round-trip — stores the target-language headline."""
+        translated = "Málaga airport sets new passenger record"
+        resp = requests.post(
+            ARTICLES_ENDPOINT,
+            headers=HEADERS,
+            json={
+                "id": self.test_id, "title": self.test_title, "date": self.test_date,
+                "title_translated": translated,
+            },
+            timeout=10,
+        )
+        self.assertIn(
+            resp.status_code, (200, 201),
+            f"Insert with title_translated failed — has the column been added? {resp.status_code}: {resp.text}"
+        )
+
+        read_resp = requests.get(
+            ARTICLES_ENDPOINT,
+            headers=HEADERS,
+            params={"id": f"eq.{self.test_id}", "select": "title,title_translated"},
+            timeout=10,
+        )
+        self.assertEqual(read_resp.status_code, 200)
+        rows = read_resp.json()
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["title_translated"], translated)
+        self.assertEqual(rows[0]["title"], self.test_title)
+
     def test_delete_article(self):
         requests.post(
             ARTICLES_ENDPOINT,

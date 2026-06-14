@@ -53,8 +53,9 @@ def _sanitize_schema(schema):
     return schema
 
 
-def _wrap_article(article_text):
-    return f"<article>\n{article_text}\n</article>"
+def _wrap_article(article_text, title=None):
+    head = f"<title>\n{title}\n</title>\n" if title else ""
+    return f"{head}<article>\n{article_text}\n</article>"
 
 
 class GeminiRateLimitError(RateLimitError):
@@ -172,11 +173,11 @@ class GeminiService(BaseAIService):
             raise RuntimeError("Gemini returned empty text")
         return text
 
-    def evaluate_and_summarize(self, article_text, source_language='es', target_language='en'):
+    def evaluate_and_summarize(self, article_text, title, source_language='es', target_language='en'):
         system_prompt = ai_prompts.get_evaluate_and_summarize_prompt(source_language, target_language)
         text = self._generate(
             system_prompt,
-            _wrap_article(article_text),
+            _wrap_article(article_text, title),
             temperature=_TEMPERATURE,
             max_output_tokens=_MAX_OUTPUT_TOKENS,
             response_schema=ai_prompts.EVALUATION_SCHEMA,

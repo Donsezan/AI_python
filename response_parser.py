@@ -14,8 +14,9 @@ def _strip_wrappers(response_text):
 
 
 def parse_evaluate_and_summarize(response_text):
-    """Parses the combined LLM response into {'score': float, 'breakdown': dict, 'summary': str}.
+    """Parses the combined LLM response into {'score': float, 'breakdown': dict, 'summary': str, 'title': str}.
 
+    `title` is the headline rewritten in the target language ("" when missing).
     The score is the mean of all five dimensions — a 0 (e.g. pure party
     politics) lowers the average rather than being excluded. Returns None when
     the response is not valid JSON, so callers can distinguish "model failed"
@@ -34,4 +35,5 @@ def parse_evaluate_and_summarize(response_text):
     breakdown = {key: obj.get(key, 0) for key in _EVALUATION_KEYS}
     score = sum(breakdown.values()) / len(_EVALUATION_KEYS)
     summary = (obj.get("summary") or "").strip()
-    return {"score": score, "breakdown": breakdown, "summary": summary}
+    title = (obj.get("title") or "").strip()
+    return {"score": score, "breakdown": breakdown, "summary": summary, "title": title}
