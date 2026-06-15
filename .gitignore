@@ -49,6 +49,7 @@ desktop.ini
 # Claude Code internals
 .claude/
 CLAUDE.md
+claude.md
 
 # Testing & coverage
 .coverage
