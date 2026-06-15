@@ -36,7 +36,7 @@ No linter is configured. Use `flake8` or `ruff` if needed.
 The bot runs a scheduled `job()` function in [main.py](main.py) every 10 minutes. The per-article pipeline is ordered **cheapest-first** so free checks always run before quota-consuming API calls (free-tier Gemini quotas are requests-per-day bound, not token bound):
 
 1. **Retry pending posts** — Telegram posts that failed earlier are re-sent from the in-memory `_pending_posts` queue without new LLM calls (the summary is already paid for); after 3 failed attempts the URL is marked `post_failed` in the seen-cache
-2. **Fetch list** — [fetching_data.py](fetching_data.py) scrapes article links from the homepage. If the (filtered) list is byte-identical to the last cleanly-completed cycle (SHA-1 hash), the whole cycle is skipped for free
+2. **Fetch list** — each scraper in `fetch_services` (the `scrapers/` package) scrapes article links from its homepage; the combined `(title, href, scraper)` list is processed together. If the `(title, href)` pairs are byte-identical to the last cleanly-completed cycle (SHA-1 hash), the whole cycle is skipped for free
 3. **Skip checks (free)** — per article: URL exact-match via `is_url_seen()` against the cached `known_articles` list, then [seen_cache.py](seen_cache.py) — a persistent JSON cache (`seen_cache.json`) of terminal outcomes (`too_old`, `no_content`, `duplicate`, `post_failed`) and transient-failure attempt counters (terminal after 3 attempts). This prevents unsaveable articles from being re-processed every cycle
 4. **Fetch article (free)** — `fetch_article()` returns `(soup, date_time)` or a status string: `"fetch_failed"` (HTTP/parse error, missing `<h1>` or timestamp) or `"too_old"` (older than 7 days). Failures are recorded in the seen-cache *before* any API call is spent
 5. **Deduplicate (1 embed call)** — title cosine similarity via Gemini embeddings + `is_new_article_cached()` in [data_service.py](data_service.py) (threshold 0.85); falls back to Jaccard on legacy rows without embeddings. The embedding is returned and reused on save
@@ -45,7 +45,14 @@ The bot runs a scheduled `job()` function in [main.py](main.py) every 10 minutes
 8. **Save** — original title, URL, embedding, and the translated title (`title_translated` column) saved to Supabase after a confirmed post and appended to the in-memory `known_articles` (so a same-story second URL in the same cycle is deduplicated); the embedding is still computed from the **original** title for dedup consistency with legacy rows. If the save fails, the URL is recorded as `posted` in the seen-cache to prevent a duplicate post
 9. **Cleanup** — Daily job removes Supabase entries older than 10 days; the seen-cache self-prunes entries not seen for 14 days
 
-A planned refactor to support multiple news sources (turning `FetchingData` into a `BaseScraper` ABC with per-source subclasses under `scrapers/`) is documented in [MULTI_SOURCE_DESIGN.md](MULTI_SOURCE_DESIGN.md) — not yet implemented.
+### Multi-source scraping (`scrapers/`)
+
+Multiple news sources are supported via a `BaseScraper` ABC with per-source subclasses:
+- [base_scraper.py](scrapers/base_scraper.py) — shared pipeline: `fetch_latest_articles()` (uses `LINK_SELECTOR`), the `fetch_article()` skeleton (HTTP GET, `<h1>` check, `MAX_AGE_DAYS` `"too_old"` cutoff, `"fetch_failed"`/`(soup, datetime)` contract), and `parse_content()`. Subclasses override the abstract hooks `_extract_date()` / `_extract_images()` and optionally `_content_root()`
+- [malagahoy_scraper.py](scrapers/malagahoy_scraper.py) — `MalagaHoyScraper`: Spanish-text dates from `<p class="timestamp-atom">`, `<source srcset>` images
+- [diariosur_scraper.py](scrapers/diariosur_scraper.py) — `DiarioSurScraper`: ISO dates from `<meta article:published_time>` / `<time datetime>` (tz stripped to stay naive), body scoped to `<main>`, `og:image` + `<main>` images (author thumbnails filtered)
+
+Add a source by writing a new `BaseScraper` subclass and appending it to `fetch_services` in [main.py](main.py). Dedup (`is_url_seen`, `seen_cache`, `is_new_article_cached`) is source-agnostic (URL/embedding keyed).
 
 ### AI Provider Abstraction (`ai/`)
 
@@ -74,7 +81,8 @@ All credentials live in `.env` (loaded via `python-dotenv`):
 ```
 BOT_TOKEN                        # Telegram bot token
 CHAT_ID                          # Target Telegram channel/chat
-NEWS_URL                         # Source URL (malagahoy.es/malaga/)
+NEWS_URL                         # malagahoy.es source URL (malagahoy.es/malaga/)
+DIARIOSUR_URL                    # Optional: diariosur.es source URL (default: diariosur.es/malaga/)
 GEMINI_API_KEY                   # Google Generative AI key (used for both generation and embeddings)
 SUPABASE_URL                     # Supabase project URL
 SUPABASE_KEY                     # Supabase service role key
@@ -108,6 +116,7 @@ Tests use `unittest`. Coverage is mixed mock/integration:
 - [tests/test_ai_services.py](tests/test_ai_services.py) — `evaluate_and_summarize()` for both providers with mocked HTTP clients, including the `responseJsonSchema` → legacy fallback and 429/`retry_after` parsing
 - [tests/test_response_parser.py](tests/test_response_parser.py) — combined-response parsing: scoring math (zeros count), fence/think-tag stripping, `None` on invalid JSON
 - [tests/test_seen_cache.py](tests/test_seen_cache.py) — seen-cache skip/attempt/prune/persistence behavior (tempdir, no network)
+- [tests/test_scrapers.py](tests/test_scrapers.py) — `DiarioSurScraper`/`MalagaHoyScraper` date, image, and content-scoping extraction against in-line HTML fixtures (no network)
 - [tests/test_similarity.py](tests/test_similarity.py) — pure-numpy cosine math; real Gemini embedding calls (skipped when `GEMINI_API_KEY` is absent); `DataService` similarity with mocked Supabase
 - [tests/test_supabase_connection.py](tests/test_supabase_connection.py) — **real Supabase integration** (CRUD round-trips); reads credentials from `.env` directly
 

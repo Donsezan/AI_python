@@ -53,6 +53,7 @@ SUPABASE_URL=https://your-project.supabase.co
 SUPABASE_KEY=your_supabase_anon_or_service_key
 
 # Optional
+DIARIOSUR_URL=https://www.diariosur.es/malaga/   # second news source (default shown)
 GEMINI_MODEL=gemini-2.5-flash-lite          # default; switch to gemini-2.5-flash for higher quality
 GEMINI_MIN_CALL_INTERVAL_SEC=6.5            # min seconds between Gemini calls (rate-limit guard)
 LOG_LEVEL=INFO

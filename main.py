@@ -8,7 +8,7 @@ import logging
 from datetime import datetime, timedelta, date
 from dotenv import load_dotenv
 
-from fetching_data import FetchingData
+from scrapers import MalagaHoyScraper, DiarioSurScraper
 from ai.ai_service import AIService
 from telegram_service import TelegramService
 from data_service import DataService
@@ -32,6 +32,7 @@ MAX_POST_ATTEMPTS = 3
 BOT_TOKEN = os.getenv('BOT_TOKEN')
 CHAT_ID = os.getenv('CHAT_ID')
 NEWS_URL = os.getenv('NEWS_URL')
+DIARIOSUR_URL = os.getenv('DIARIOSUR_URL', 'https://www.diariosur.es/malaga/')
 GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
 SUPABASE_URL = os.getenv('SUPABASE_URL')
 SUPABASE_KEY = os.getenv('SUPABASE_KEY')
@@ -44,7 +45,10 @@ current_ai_provider = AIProvider.GEMINI
 
 # Initialize services
 data_service = DataService(supabase_url=SUPABASE_URL, supabase_key=SUPABASE_KEY, DISTANCE_THRESHOLD=DISTANCE_THRESHOLD, gemini_api_key=GEMINI_API_KEY)
-fetch_service = FetchingData(NEWS_URL, HEADERS)
+fetch_services = [
+    MalagaHoyScraper(NEWS_URL, HEADERS),
+    DiarioSurScraper(DIARIOSUR_URL, HEADERS),
+]
 telegram_service = TelegramService(BOT_TOKEN, CHAT_ID)
 ai_service = AIService.get_service(provider=current_ai_provider, gemini_api_key=GEMINI_API_KEY)
 seen_cache = SeenCache()
@@ -127,10 +131,11 @@ def job(dry_run=False):
         _retry_pending_posts()
 
     logger.info("Fetching latest articles...")
-    new_articles = [
-        (title, href) for title, href in fetch_service.fetch_latest_articles()
-        if href and len(title.strip()) >= 20
-    ]
+    new_articles = []
+    for scraper in fetch_services:
+        for title, href in scraper.fetch_latest_articles():
+            if href and len(title.strip()) >= 20:
+                new_articles.append((title, href, scraper))
     logger.info(f"Found {len(new_articles)} candidate articles.")
     if not new_articles:
         if dry_run_log:
@@ -139,7 +144,9 @@ def job(dry_run=False):
 
     # Free short-circuit: if the homepage shows exactly the same articles as the
     # last fully-completed cycle, there is nothing new to do.
-    articles_hash = hashlib.sha1(repr(new_articles).encode("utf-8")).hexdigest()
+    articles_hash = hashlib.sha1(
+        repr([(t, h) for t, h, _ in new_articles]).encode("utf-8")
+    ).hexdigest()
     if not dry_run and articles_hash == _last_articles_hash:
         logger.info("Homepage unchanged since last completed cycle — skipping.")
         return
@@ -147,7 +154,7 @@ def job(dry_run=False):
     known_articles = data_service.fetch_recent_articles()
     completed = True
     try:
-        for title, href in new_articles:
+        for title, href, scraper in new_articles:
             if _shutdown.is_set():
                 completed = False
                 break
@@ -162,7 +169,7 @@ def job(dry_run=False):
                 logger.debug(f"Skipping cached terminal URL: {href}")
                 continue
             try:
-                _process_article(title, href, known_articles, dry_run=dry_run, dry_run_log=dry_run_log)
+                _process_article(title, href, scraper, known_articles, dry_run=dry_run, dry_run_log=dry_run_log)
             except Exception as e:
                 logger.error(f"[job] Article '{title}' failed: {e!r}")
                 if dry_run_log:
@@ -181,12 +188,12 @@ def job(dry_run=False):
     logger.info("Job finished.")
 
 
-def _process_article(title, href, known_articles, dry_run=False, dry_run_log=None):
+def _process_article(title, href, scraper, known_articles, dry_run=False, dry_run_log=None):
     """Pipeline ordered cheapest-first: free HTTP/date/content checks, then one
     embedding call for dedup, then a single combined evaluate+summarize call."""
     logger.info(f"Processing article: {title}")
     logger.info("Fetching article metadata...")
-    meta = fetch_service.fetch_article(title, href)
+    meta = scraper.fetch_article(title, href)
     if isinstance(meta, str):
         if meta == "too_old":
             logger.info("Article is too old, skipping.")
@@ -200,7 +207,7 @@ def _process_article(title, href, known_articles, dry_run=False, dry_run_log=Non
             dry_run_log.record(title=title, url=href, status=meta)
         return
     soup, date_time = meta
-    main_content, images = fetch_service.parse_content(soup)
+    main_content, images = scraper.parse_content(soup)
 
     if not main_content:
         logger.warning("Article content is missing.")
@@ -221,7 +228,7 @@ def _process_article(title, href, known_articles, dry_run=False, dry_run_log=Non
 
     logger.info("Evaluating and summarizing article...")
     result = _with_retry(lambda: ai_service.evaluate_and_summarize(
-        main_content, title, source_language=fetch_service.language, target_language='en'))
+        main_content, title, source_language=scraper.language, target_language='en'))
     if result is None or not result["summary"]:
         status = "evaluate_failed" if result is None else "summary_failed"
         logger.warning(f"LLM processing failed ({status}) for '{title}'. Skipping.")
@@ -230,7 +237,7 @@ def _process_article(title, href, known_articles, dry_run=False, dry_run_log=Non
         if dry_run_log:
             dry_run_log.record(
                 title=title, url=href, status=status,
-                language=fetch_service.language, article_chars=len(main_content),
+                language=scraper.language, article_chars=len(main_content),
             )
         return
     article_score = result["score"]
@@ -247,7 +254,7 @@ def _process_article(title, href, known_articles, dry_run=False, dry_run_log=Non
             dry_run_log.record(
                 title=title, url=href, status="below_threshold", score=article_score, breakdown=breakdown,
                 translated_title=translated_title,
-                language=fetch_service.language, article_chars=len(main_content),
+                language=scraper.language, article_chars=len(main_content),
             )
         if not dry_run:
             if data_service.save_article(title, date_time, url=href, embedding=title_embedding,
@@ -263,7 +270,7 @@ def _process_article(title, href, known_articles, dry_run=False, dry_run_log=Non
                 title=title, url=href, status="evaluated_above_threshold",
                 score=article_score, breakdown=breakdown, summary=summary,
                 translated_title=translated_title,
-                language=fetch_service.language, article_chars=len(main_content),
+                language=scraper.language, article_chars=len(main_content),
             )
         return
 
