@@ -34,9 +34,8 @@ CHAT_ID = os.getenv('CHAT_ID')
 NEWS_URL = os.getenv('NEWS_URL')
 DIARIOSUR_URL = os.getenv('DIARIOSUR_URL', 'https://www.diariosur.es/malaga/')
 GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
-SUPABASE_URL = os.getenv('SUPABASE_URL')
-SUPABASE_KEY = os.getenv('SUPABASE_KEY')
-_missing = [k for k, v in {'BOT_TOKEN': BOT_TOKEN, 'CHAT_ID': CHAT_ID, 'NEWS_URL': NEWS_URL, 'GEMINI_API_KEY': GEMINI_API_KEY, 'SUPABASE_URL': SUPABASE_URL, 'SUPABASE_KEY': SUPABASE_KEY}.items() if not v]
+DB_PATH = os.getenv('DB_PATH', 'articles.db')
+_missing = [k for k, v in {'BOT_TOKEN': BOT_TOKEN, 'CHAT_ID': CHAT_ID, 'NEWS_URL': NEWS_URL, 'GEMINI_API_KEY': GEMINI_API_KEY}.items() if not v]
 if _missing:
     raise EnvironmentError(f"Missing required environment variables: {', '.join(_missing)}")
 
@@ -44,7 +43,7 @@ if _missing:
 current_ai_provider = AIProvider.GEMINI
 
 # Initialize services
-data_service = DataService(supabase_url=SUPABASE_URL, supabase_key=SUPABASE_KEY, DISTANCE_THRESHOLD=DISTANCE_THRESHOLD, gemini_api_key=GEMINI_API_KEY)
+data_service = DataService(db_path=DB_PATH, DISTANCE_THRESHOLD=DISTANCE_THRESHOLD, gemini_api_key=GEMINI_API_KEY)
 fetch_services = [
     MalagaHoyScraper(NEWS_URL, HEADERS),
     DiarioSurScraper(DIARIOSUR_URL, HEADERS),
@@ -113,7 +112,7 @@ def _retry_pending_posts():
 
 def _finalize_posted(title, date_time, href, embedding, known_articles=None, translated_title=None):
     """Persist a successfully posted article; fall back to the seen-cache so a
-    Supabase hiccup can't cause a duplicate post next cycle."""
+    database hiccup can't cause a duplicate post next cycle."""
     if data_service.save_article(title, date_time, url=href, embedding=embedding, translated_title=translated_title):
         if known_articles is not None:
             known_articles.append({"title": title, "url": href, "embedding": embedding})

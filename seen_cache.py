@@ -10,7 +10,7 @@ class SeenCache:
     """Persistent URL → outcome cache that stops re-processing articles across cycles.
 
     Articles that reach a verdict the bot can't act on (too old, page broken,
-    no content, repeatedly failing) are not saved to Supabase, so without this
+    no content, repeatedly failing) are not saved to the database, so without this
     cache they would be re-fetched — and re-embedded / re-evaluated, burning
     free-tier quota — on every 10-minute cycle while they remain on the homepage.
 

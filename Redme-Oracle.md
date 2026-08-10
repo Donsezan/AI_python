@@ -43,15 +43,16 @@ BOT_TOKEN=...
 CHAT_ID=...
 NEWS_URL=...
 GEMINI_API_KEY=...
-SUPABASE_URL=...
-SUPABASE_KEY=...
 # Optional:
+# DB_PATH=articles.db
 # GEMINI_MODEL=gemini-2.5-flash-lite
 # GEMINI_MIN_CALL_INTERVAL_SEC=6.5
 # LOG_LEVEL=INFO
 ```
 
 Save with `Ctrl+X` → `Y` → `Enter`.
+
+Articles are stored in a local SQLite file (`articles.db` in the `WorkingDirectory`), created automatically on first run. No database credentials are needed.
 
 ### 6. Test the bot runs
 
@@ -159,3 +160,40 @@ sudo systemctl start newsbot
 ```bash
 sudo systemctl status newsbot
 ```
+
+---
+
+## One-off cutover: Supabase → local SQLite
+
+Run this **once**, when deploying the release that removed Supabase. It copies the
+existing article rows into `articles.db` so deduplication history survives — without
+it, the first cycle re-posts every article still on the homepage from the last ~7 days.
+
+```bash
+sudo systemctl stop newsbot
+cd ~/YOUR_REPO && git pull
+source .venv/bin/activate
+
+python3 scripts/migrate_supabase_to_sqlite.py --dry-run   # check the row count first
+python3 scripts/migrate_supabase_to_sqlite.py             # needs SUPABASE_* still in .env
+python3 main.py --dry-run                                 # verify, then Ctrl+C
+
+nano .env                                                 # now remove SUPABASE_URL / SUPABASE_KEY
+sudo systemctl start newsbot
+```
+
+Order matters: the migration must run **before** `SUPABASE_*` is stripped from `.env`,
+and `--dry-run` must pass before the service restarts. The migration is idempotent
+(`INSERT OR IGNORE` on `id`), so a partial or repeated run is safe.
+
+### Backing up the database
+
+`articles.db` is the only copy of the dedup history. Losing it costs one round of
+duplicate posts plus the Gemini quota to re-evaluate ~7 days of articles — recoverable,
+not catastrophic. To copy it safely while the bot is running:
+
+```bash
+sqlite3 ~/YOUR_REPO/articles.db ".backup ~/articles-backup.db"
+```
+
+Never use a bare `cp` on a live WAL database — it can capture a torn snapshot.

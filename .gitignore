@@ -26,6 +26,8 @@ build/
 *.sqlite
 *.sqlite3
 *.db
+*.db-wal
+*.db-shm
 chroma_db_persistence/
 
 # Logs

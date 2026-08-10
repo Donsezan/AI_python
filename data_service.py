@@ -5,6 +5,8 @@ from datetime import datetime, timedelta
 import numpy as np
 import requests
 
+from sqlite_store import SqliteStore
+
 logger = logging.getLogger(__name__)
 
 _EMBED_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-embedding-2:embedContent"
@@ -15,15 +17,12 @@ _UNSET = object()
 
 
 class DataService:
+    """Deduplication policy: embeddings, cosine/Jaccard similarity and the
+    new-vs-duplicate decision. Persistence is delegated to `SqliteStore`."""
 
-    def __init__(self, supabase_url, supabase_key, DISTANCE_THRESHOLD, gemini_api_key):
+    def __init__(self, db_path, DISTANCE_THRESHOLD, gemini_api_key):
         self.similarity_threshold = 1 - DISTANCE_THRESHOLD
-        self.url = f"{supabase_url.rstrip('/')}/rest/v1/articles"
-        self.headers = {
-            "apikey": supabase_key,
-            "Authorization": f"Bearer {supabase_key}",
-            "Content-Type": "application/json",
-        }
+        self.store = SqliteStore(db_path)
         self._gemini_api_key = gemini_api_key
 
     def _embed(self, text):
@@ -67,13 +66,7 @@ class DataService:
         return len(ta & tb) / len(ta | tb)
 
     def fetch_recent_articles(self):
-        try:
-            resp = requests.get(self.url, headers=self.headers, params={"select": "title,embedding,url"}, timeout=15)
-            resp.raise_for_status()
-            return resp.json()
-        except Exception as e:
-            logger.error(f"Error fetching recent articles: {e}")
-            return []
+        return self.store.fetch_all()
 
     def is_url_seen(self, href, rows):
         return any(row.get("url") == href for row in rows)
@@ -108,41 +101,19 @@ class DataService:
                 logger.warning(f"Embedding failed, saving without embedding: {e}")
                 embedding = None
 
-        try:
-            payload = {
-                "id": str(uuid.uuid4()),
-                "title": title,
-                "date": date_time.isoformat(),
-                "embedding": embedding,
-            }
-            if url:
-                payload["url"] = url
-            if translated_title:
-                payload["title_translated"] = translated_title
-            resp = requests.post(
-                self.url,
-                headers=self.headers,
-                json=payload,
-                timeout=15,
-            )
-            resp.raise_for_status()
+        saved = self.store.insert(
+            str(uuid.uuid4()),
+            title,
+            date_time.isoformat(),
+            url=url or None,
+            embedding=embedding,
+            title_translated=translated_title or None,
+        )
+        if saved:
             logger.info(f"Article '{title}' saved to database.")
-            return True
-        except Exception as e:
-            logger.error(f"Error saving article '{title}': {e}")
-            return False
+        return saved
 
     def cleanup_old_articles(self, max_age_days=10):
-        try:
-            cutoff = (datetime.now() - timedelta(days=max_age_days)).isoformat()
-            resp = requests.delete(
-                self.url,
-                headers={**self.headers, "Prefer": "count=exact"},
-                params={"date": f"lt.{cutoff}"},
-                timeout=15,
-            )
-            resp.raise_for_status()
-            count = resp.headers.get("Content-Range", "*/0").split("/")[-1]
-            logger.info(f"Deleted {count} old articles from the database.")
-        except Exception as e:
-            logger.error(f"Error cleaning up old articles: {e}")
+        cutoff = (datetime.now() - timedelta(days=max_age_days)).isoformat()
+        count = self.store.delete_older_than(cutoff)
+        logger.info(f"Deleted {count} old articles from the database.")

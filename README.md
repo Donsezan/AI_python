@@ -5,8 +5,8 @@ A news aggregation bot that scrapes local Málaga news, evaluates article releva
 ## How It Works
 
 1. **Fetch** — Scrapes article links and content from the configured news source
-2. **Deduplicate** — Checks the article URL against Supabase first (free, in-memory); then embeds the title with Gemini (`gemini-embedding-2`) and compares cosine similarity against stored embeddings; falls back to Jaccard on legacy rows
-3. **Evaluate** — Gemini scores each article's relevance (0–10); articles below 6 are saved to Supabase (so they are not re-evaluated next cycle) and then skipped
+2. **Deduplicate** — Checks the article URL against the local database first (free, in-memory); then embeds the title with Gemini (`gemini-embedding-2`) and compares cosine similarity against stored embeddings; falls back to Jaccard on rows without one
+3. **Evaluate** — Gemini scores each article's relevance (0–10); articles below 6 are saved to the database (so they are not re-evaluated next cycle) and then skipped
 4. **Summarize** — Gemini generates an emoji-rich, Telegram-ready summary
 5. **Post** — Sends media groups (up to 9 images) or plain text to the Telegram channel
 6. **Cleanup** — Daily job removes articles older than 10 days
@@ -20,17 +20,10 @@ All Gemini calls are staggered (default 6.5s minimum spacing) and respect Google
 - Python 3.10+
 - A Telegram bot token and target chat/channel ID
 - A Google Gemini API key (used for article evaluation, summarization, **and** title embeddings)
-- A [Supabase](https://supabase.com) project with an `articles` table:
-  ```sql
-  create table articles (
-    id uuid primary key,
-    title text,
-    date text,
-    embedding jsonb,
-    url text
-  );
-  create unique index articles_url_idx on articles (url) where url is not null;
-  ```
+
+No database server is required. Articles are stored in a local SQLite file (`articles.db` by default, override with `DB_PATH`) created automatically on first run — there is no DDL step and no credentials to configure. Title embeddings are held as compact float32 BLOBs.
+
+> The database is the only copy of the deduplication history. Losing it costs one round of duplicate posts plus the Gemini quota to re-evaluate the last ~7 days of homepage articles. To back it up, use `sqlite3 articles.db ".backup backup.db"` — never a bare `cp` of a live WAL database.
 
 ### Install
 
@@ -49,10 +42,9 @@ BOT_TOKEN=your_telegram_bot_token
 CHAT_ID=your_telegram_chat_id
 NEWS_URL=https://www.malagahoy.es/malaga/
 GEMINI_API_KEY=your_gemini_api_key
-SUPABASE_URL=https://your-project.supabase.co
-SUPABASE_KEY=your_supabase_anon_or_service_key
 
 # Optional
+DB_PATH=articles.db                         # local SQLite article store (default shown)
 DIARIOSUR_URL=https://www.diariosur.es/malaga/   # second news source (default shown)
 GEMINI_MODEL=gemini-2.5-flash-lite          # default; switch to gemini-2.5-flash for higher quality
 GEMINI_MIN_CALL_INTERVAL_SEC=6.5            # min seconds between Gemini calls (rate-limit guard)
@@ -92,10 +84,13 @@ Gemini 429s are handled in three places:
 ```
 ├── main.py                  # Entry point, scheduler, job orchestration
 ├── fetching_data.py         # Web scraping (BeautifulSoup)
-├── data_service.py          # Supabase deduplication (Gemini embeddings + cosine similarity)
+├── data_service.py          # Deduplication policy (Gemini embeddings + cosine similarity)
+├── sqlite_store.py          # Local SQLite persistence (schema, BLOB codec, CRUD)
 ├── telegram_service.py      # Telegram posting (media groups + text)
 ├── response_parser.py       # JSON + regex extraction from AI responses
 ├── requirements.txt
+├── scripts/
+│   └── migrate_supabase_to_sqlite.py   # One-off cutover from the old Supabase table
 └── ai/
     ├── ai_service.py        # Factory: AIService.get_service(provider)
     ├── base_ai_service.py   # Abstract base (evaluate, summarize)
@@ -110,13 +105,14 @@ Gemini 429s are handled in three places:
 ```bash
 python -m unittest discover -s tests -p "test_*.py"        # All tests
 python -m unittest tests.test_ai_services                   # AI service (evaluate + summarize)
-python -m unittest tests.test_similarity                    # Cosine math + Cohere embedding + Supabase integration
-python -m unittest tests.test_supabase_connection           # Live Supabase connection (requires credentials)
+python -m unittest tests.test_similarity                    # Cosine math + Gemini embeddings + dedup
+python -m unittest tests.test_sqlite_store                  # Local SQLite storage layer
+python -m unittest tests.test_migration_script              # One-off Supabase -> SQLite migration
 ```
 
 Unit tests mock all external API calls — no live credentials required for most tests.  
-`test_similarity.py` runs real Gemini embedding calls when `GEMINI_API_KEY` is set; otherwise the API-dependent classes are skipped automatically.  
-`test_supabase_connection.py` hits the live Supabase REST API and requires `SUPABASE_URL` and `SUPABASE_KEY`.
+Storage tests run against a real SQLite file in a temp directory: no credentials, no network.  
+`test_similarity.py` runs real Gemini embedding calls when `GEMINI_API_KEY` is set; otherwise the API-dependent classes are skipped automatically.
 
 ## Key Constants
 
