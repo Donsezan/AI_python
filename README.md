@@ -89,8 +89,6 @@ Gemini 429s are handled in three places:
 ├── telegram_service.py      # Telegram posting (media groups + text)
 ├── response_parser.py       # JSON + regex extraction from AI responses
 ├── requirements.txt
-├── scripts/
-│   └── migrate_supabase_to_sqlite.py   # One-off cutover from the old Supabase table
 └── ai/
     ├── ai_service.py        # Factory: AIService.get_service(provider)
     ├── base_ai_service.py   # Abstract base (evaluate, summarize)
@@ -107,7 +105,6 @@ python -m unittest discover -s tests -p "test_*.py"        # All tests
 python -m unittest tests.test_ai_services                   # AI service (evaluate + summarize)
 python -m unittest tests.test_similarity                    # Cosine math + Gemini embeddings + dedup
 python -m unittest tests.test_sqlite_store                  # Local SQLite storage layer
-python -m unittest tests.test_migration_script              # One-off Supabase -> SQLite migration
 ```
 
 Unit tests mock all external API calls — no live credentials required for most tests.  

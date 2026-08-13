@@ -52,7 +52,7 @@ The per-article pipeline is ordered **cheapest-first** so free checks always run
 
 ### Storage (`sqlite_store.py` + `data_service.py`)
 
-Articles live in a local SQLite file (`DB_PATH`, default `articles.db`) next to `seen_cache.json`. There is no database server and no network call in the storage path — this replaced Supabase, whose free-tier egress cap was being blown by re-reading every embedding on all 144 cycles/day.
+Articles live in a local SQLite file (`DB_PATH`, default `articles.db`) next to `seen_cache.json`. There is no database server and no network call in the storage path — a hosted database was dropped because its free-tier egress cap was being blown by re-reading every embedding on all 144 cycles/day.
 
 The two modules split along a policy/persistence line:
 
@@ -63,12 +63,10 @@ Embeddings are stored as **float32 little-endian BLOBs** (~12 KB/row vs ~60 KB a
 
 Two things `main.py` depends on and that must not regress:
 
-- **Failures are logged and swallowed**, returning `[]` / `False` / `0` — never raised. A `False` from `save_article` is what triggers `record_terminal(href, "posted")`, the guard against duplicate posts. `insert()` therefore uses a plain `INSERT`, not `INSERT OR IGNORE`, so a duplicate id or url surfaces as `False` (matching the old PostgREST 409) instead of silently reporting success
+- **Failures are logged and swallowed**, returning `[]` / `False` / `0` — never raised. A `False` from `save_article` is what triggers `record_terminal(href, "posted")`, the guard against duplicate posts. `insert()` therefore uses a plain `INSERT`, not `INSERT OR IGNORE`, so a duplicate id or url surfaces as `False` instead of silently reporting success
 - **`fetch_all()` returns rows with numpy embeddings**, while `main.py` appends in-cycle results as plain dicts with list embeddings. `_cosine` calls `np.array()` on both operands, so the mixed types work without special-casing. (`np.frombuffer` returns a read-only array; `np.array()` copies, so nothing mutates it.)
 
 `date` is an ISO-8601 **text** column and `delete_older_than` compares it lexicographically, which is chronological for a consistent ISO format.
-
-[scripts/migrate_supabase_to_sqlite.py](scripts/migrate_supabase_to_sqlite.py) is the one-off cutover tool — it pages the old PostgREST table and writes with `INSERT OR IGNORE` on `id`, so it is idempotent and safe to re-run. It is the only remaining Supabase code path and is not imported by the bot.
 
 ### Multi-source scraping (`scrapers/`)
 
@@ -147,7 +145,6 @@ Tests use `unittest`. Coverage is mixed mock/integration:
 - [tests/test_scrapers.py](tests/test_scrapers.py) — `DiarioSurScraper`/`MalagaHoyScraper` date, image, and content-scoping extraction against in-line HTML fixtures (no network)
 - [tests/test_similarity.py](tests/test_similarity.py) — pure-numpy cosine math; `DataService` dedup against a seeded temp-directory database (the `_embed` network boundary stubbed, everything else real); real Gemini embedding calls skipped when `GEMINI_API_KEY` is absent
 - [tests/test_sqlite_store.py](tests/test_sqlite_store.py) — `SqliteStore` CRUD, float32 BLOB fidelity, NULL embeddings, unique-index rejection, retention cutoff boundary, schema bootstrap (tempdir, no network)
-- [tests/test_migration_script.py](tests/test_migration_script.py) — the one-off migration's row conversion and idempotent `INSERT OR IGNORE` write path (no network)
 
 Storage tests need no credentials and hit no network. Integration tests hit live APIs when keys are present in `.env` — be mindful of Gemini free-tier quotas when running the full suite.
 
